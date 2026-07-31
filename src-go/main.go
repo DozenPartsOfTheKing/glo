@@ -1,0 +1,1253 @@
+//go:build windows
+
+// Glasspad — прозрачный блокнот поверх всех окон, прозрачность 0-100%.
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
+	"unicode/utf16"
+	"unsafe"
+)
+
+// Пиксели этого цвета становятся полностью прозрачными (LWA_COLORKEY).
+var colorKey = rgb(255, 0, 254)
+
+const (
+	barBG     = 0x221C1C // COLORREF = 0x00BBGGRR
+	barFG     = 0xAAA09A
+	barHot    = 0xFFFFFF
+	trackBG   = 0x362D2B
+	knobBG    = 0xE0E0E0
+	dimFG     = 0x807060
+	appTitle  = "Glasspad"
+	className = "GlasspadWnd"
+	backClass = "GlasspadBackdropWnd"
+)
+
+// Плашка под буквами: включена или нет. Прозрачность к буквам отношения не
+// имеет — она живёт на отдельном окне-подложке.
+const (
+	modePlain  = 0
+	modeMarker = 1
+)
+
+var modeNames = []string{"Без плашки", "Маркер"}
+
+type palette struct {
+	name   string
+	fg     uint32
+	marker uint32
+}
+
+var palettes = []palette{
+	{"Белый", 0xFFFFFF, 0x000000},
+	{"Чёрный", 0x000000, 0xFFFFFF},
+	{"Лайм", 0x3CFFB6, 0x00140A},
+	{"Жёлтый", 0x3DD9FF, 0x00141A},
+	{"Циан", 0xFFE76E, 0x1A1300},
+	{"Розовый", 0xD97AFF, 0x14001A},
+}
+
+const (
+	fontMin = 8
+	fontMax = 72
+)
+
+var fontPresets = []int{12, 16, 20, 28, 36, 48, 72}
+
+// команды (акселераторы, кнопки панели, глобальные хоткеи)
+const (
+	cmdMode = 100 + iota
+	cmdPalette
+	cmdBW
+	cmdTopmost
+	cmdCompact
+	cmdClickThrough
+	cmdOpen
+	cmdSave
+	cmdQuit
+	cmdShowHide
+	cmdAlphaUp
+	cmdAlphaDown
+	cmdFontUp
+	cmdFontDown
+	cmdFontPreset
+	cmdSettings
+	cmdTray
+	cmdTaskbar
+	cmdOpenDir
+)
+
+// Пункты подменю: команда = база + номер варианта.
+const (
+	cmdPalBase   = 300
+	cmdSizeBase  = 340
+	cmdAlphaBase = 380
+)
+
+var alphaPresets = []int{0, 25, 50, 75, 100}
+
+const (
+	hkAlphaUp = 1 + iota
+	hkAlphaDown
+	hkClickThrough
+	hkHideAll
+)
+
+const (
+	htLeft        = 10
+	htRight       = 11
+	htTop         = 12
+	htTopLeft     = 13
+	htTopRight    = 14
+	htBottom     = 15
+	htBottomLeft = 16
+	idEdit       = 1000
+	timerSave    = 1
+	timerBeat    = 2
+)
+
+type config struct {
+	Alpha    int  `json:"alpha"`
+	Mode     int  `json:"mode"`
+	Palette  int  `json:"palette"`
+	FontSize int  `json:"font_size"`
+	Topmost  bool `json:"topmost"`
+	Compact  bool `json:"compact"`
+	Tray     bool `json:"tray"`
+	Taskbar  bool `json:"taskbar"`
+	X        int  `json:"x"`
+	Y        int  `json:"y"`
+	W        int  `json:"w"`
+	H        int  `json:"h"`
+}
+
+func defaultConfig() config {
+	// Прозрачность по умолчанию невысокая: на 80% подложка выглядит просто
+	// чёрным прямоугольником, и непонятно, что окно вообще прозрачное.
+	return config{Alpha: 30, Mode: modeMarker, Palette: 0, FontSize: 16,
+		Topmost: true, Tray: true, Taskbar: true,
+		X: 120, Y: 120, W: 560, H: 360}
+}
+
+type barItem struct {
+	cmd   int32
+	label string
+	r     rect
+	fg    uint32
+	bg    uint32
+}
+
+type app struct {
+	hwnd, hEdit, hBack, hInst uintptr
+	cfg                       config
+	dpi                       int32
+	barH                      int32
+	margin                    int32
+
+	editFont, barFont          uintptr
+	bgBrush, barBrush          uintptr
+	backBrush                  uintptr
+	trackBrush, knobBrush      uintptr
+	fontQ                      uint32
+	items                      []barItem
+	sliderRect                 rect
+	draggingSlider             bool
+	clickThrough               bool
+	hidden                     bool
+	beats                      int
+	tray                       notifyIconData
+	savedText                  string
+	notePath, cfgPath, dataDir string
+}
+
+var a app
+
+// Очередь сообщений в Windows принадлежит потоку, который создал окно.
+// Главная горутина Go по умолчанию не привязана к потоку ОС и после любого
+// блокирующего вызова может переехать на другой — тогда GetMessage крутится
+// не там, где живёт окно, и оно намертво «не отвечает». Прибиваем гвоздями.
+func init() {
+	runtime.LockOSThread()
+}
+
+func main() {
+	setProcessDPIAware()
+	a.initPaths()
+	a.cfg = loadConfig(a.cfgPath)
+
+	dc := getDC(0)
+	a.dpi = getDeviceCaps(dc, logPixelsY)
+	releaseDC(0, dc)
+	if a.dpi <= 0 {
+		a.dpi = 96
+	}
+	a.barH = a.scale(30)
+	a.margin = a.scale(6)
+
+	a.hInst = getModuleHandle()
+	a.registerClass()
+	a.createWindows()
+	a.applyColors()
+	a.applyFont()
+	a.applyAlpha(a.cfg.Alpha)
+	a.applyTopmost()
+	a.loadNote()
+
+	showWindow(a.hBack, swShowNA)
+	showWindow(a.hwnd, swShow)
+	a.syncBackdrop()
+	updateWindow(a.hwnd)
+	setFocus(a.hEdit)
+
+	if a.cfg.Tray {
+		a.addTrayIcon()
+	}
+	if !a.cfg.Taskbar {
+		a.setTaskbar(false)
+	}
+	a.registerHotKeys()
+	setTimer(a.hwnd, timerSave, 5000)
+	setTimer(a.hwnd, timerBeat, 1000)
+	logf("вход в цикл сообщений")
+
+	accels := createAcceleratorTable(accelTable())
+	var m msg
+	for getMessage(&m) > 0 {
+		if !translateAccelerator(a.hwnd, accels, &m) {
+			translateMessage(&m)
+			dispatchMessage(&m)
+		}
+	}
+	logf("=== выход, всё чисто")
+	closeLog()
+}
+
+func (a *app) scale(v int32) int32 { return v * a.dpi / 96 }
+
+func (a *app) initPaths() {
+	// %AppData%\Glasspad — то же место, что использует и питоновская версия.
+	base, err := os.UserConfigDir()
+	if err != nil {
+		if base, err = os.UserHomeDir(); err != nil {
+			base = "."
+		}
+	}
+	a.dataDir = filepath.Join(base, "Glasspad")
+	os.MkdirAll(a.dataDir, 0o755)
+	a.notePath = filepath.Join(a.dataDir, "note.txt")
+	a.cfgPath = filepath.Join(a.dataDir, "settings.json")
+	openLog(a.dataDir)
+	logf("папка данных: %s", a.dataDir)
+}
+
+// ------------------------------------------------------------------ создание
+
+func (a *app) registerClass() {
+	a.bgBrush = createSolidBrush(colorKey)
+	wc := wndClassEx{
+		Style:         0x0002 | 0x0001, // CS_HREDRAW | CS_VREDRAW
+		LpfnWndProc:   syscall.NewCallback(wndProc),
+		HInstance:     a.hInst,
+		HCursor:       loadCursorArrow(),
+		HbrBackground: 0, // фон рисуем сами
+		LpszClassName: str16(className),
+	}
+	wc.CbSize = uint32(unsafe.Sizeof(wc))
+	registerClass(&wc)
+
+	back := wc
+	back.LpfnWndProc = syscall.NewCallback(backProc)
+	back.LpszClassName = str16(backClass)
+	registerClass(&back)
+}
+
+func (a *app) createWindows() {
+	// Подложка — отдельное окно позади основного. Вся прозрачность живёт на нём,
+	// поэтому буквы в основном окне никогда не выцветают.
+	a.hBack = createWindowEx(
+		wsExLayered|wsExToolWindow|wsExNoActivate,
+		str16(backClass), str16(appTitle),
+		wsPopup,
+		int32(a.cfg.X), int32(a.cfg.Y), int32(a.cfg.W), int32(a.cfg.H),
+		0, 0, a.hInst)
+
+	// Без WS_EX_TOOLWINDOW: окно должно быть в панели задач и в Alt+Tab.
+	// Оверлей без единого привычного способа закрыться — это ловушка для
+	// того, кто получил программу без инструкции.
+	a.hwnd = createWindowEx(
+		wsExLayered|wsExAppWindow,
+		str16(className), str16(appTitle),
+		wsPopup|wsThickFrame|wsClipChild,
+		int32(a.cfg.X), int32(a.cfg.Y), int32(a.cfg.W), int32(a.cfg.H),
+		0, 0, a.hInst)
+
+	// Ключевой цвет — навсегда и без LWA_ALPHA: фон проваливается насквозь,
+	// всё нарисованное поверх остаётся полностью непрозрачным.
+	setLayered(a.hwnd, colorKey, 255, lwaColorKey)
+
+	a.hEdit = createWindowEx(0, str16("EDIT"), str16(""),
+		wsChild|wsVisible|esMultiline|esAutoVScrol|esWantReturn|esNoHideSel,
+		0, 0, 10, 10, a.hwnd, uintptr(idEdit), a.hInst)
+	sendMessage(a.hEdit, emSetLimitText, 0, 0)
+
+	a.barBrush = createSolidBrush(barBG)
+	a.trackBrush = createSolidBrush(trackBG)
+	a.knobBrush = createSolidBrush(knobBG)
+	a.barFont = createFont(-a.scale(12), 400, 5, "Segoe UI")
+	a.layoutChildren()
+}
+
+func (a *app) layoutChildren() {
+	if a.hwnd == 0 || a.hEdit == 0 {
+		return // WM_SIZE прилетает ещё внутри CreateWindowEx
+	}
+	c := getClientRect(a.hwnd)
+	top := a.barH
+	if a.cfg.Compact {
+		top = 0
+	}
+	moveWindow(a.hEdit, a.margin, top, c.w()-2*a.margin, c.h()-top-a.margin, true)
+}
+
+// ------------------------------------------------------------- вид и режимы
+
+// syncBackdrop держит подложку строго под основным окном — и по координатам,
+// и по z-порядку. Вставка сразу за основным окном заодно подтягивает ей
+// признак «поверх всех», если он включён.
+func (a *app) syncBackdrop() {
+	if a.hwnd == 0 || a.hBack == 0 {
+		return
+	}
+	r := getWindowRect(a.hwnd)
+	setWindowPos(a.hBack, a.hwnd, r.Left, r.Top, r.w(), r.h(), swpNoActivate)
+}
+
+func (a *app) applyColors() {
+	pal := palettes[a.cfg.Palette%len(palettes)]
+	old := a.backBrush
+	a.backBrush = createSolidBrush(pal.marker) // подложка в цвет плашки маркера
+	invalidate(a.hBack, nil)
+	invalidate(a.hwnd, nil)
+	invalidate(a.hEdit, nil)
+	deleteObject(old)
+}
+
+func (a *app) applyAlpha(v int) {
+	if v < 0 {
+		v = 0
+	}
+	if v > 100 {
+		v = 100
+	}
+	a.cfg.Alpha = v
+	setLayered(a.hBack, 0, byte(v*255/100), lwaAlpha)
+	a.updateBackdropHitTest()
+	if a.fontQ != a.wantFontQuality() {
+		a.applyFont()
+	}
+	invalidate(a.hwnd, &rect{0, 0, getClientRect(a.hwnd).w(), a.barH})
+}
+
+// У слоёного окна пиксели ключевого цвета не ловят мышь — клик по пустому
+// месту заметки провалился бы в приложение под ней. Пока подложка видна,
+// она эти клики принимает и передаёт фокус в текст; на нуле прозрачности
+// пропускает всё насквозь, как и положено оверлею.
+func (a *app) updateBackdropHitTest() {
+	if a.hBack == 0 {
+		return
+	}
+	ex := getWindowLong(a.hBack, gwlExStyle)
+	if a.cfg.Alpha == 0 || a.clickThrough {
+		ex |= wsExTransparent
+	} else {
+		ex &^= wsExTransparent
+	}
+	setWindowLong(a.hBack, gwlExStyle, ex)
+}
+
+// wantFontQuality: когда буквы висят прямо над рабочим столом (нет ни плашки,
+// ни заметной подложки), сглаживание смешивается с ключевым цветом и даёт
+// розовую кайму по краям глифов — тогда его выключаем.
+func (a *app) wantFontQuality() uint32 {
+	if a.cfg.Mode == modeMarker || a.cfg.Alpha >= 25 {
+		return 5 // CLEARTYPE_QUALITY
+	}
+	return 3 // NONANTIALIASED_QUALITY
+}
+
+func (a *app) applyFont() {
+	a.fontQ = a.wantFontQuality()
+	old := a.editFont
+	a.editFont = createFont(-(int32(a.cfg.FontSize) * a.dpi / 72), 400, a.fontQ, "Consolas")
+	sendMessage(a.hEdit, wmSetFont, a.editFont, 1)
+	deleteObject(old)
+}
+
+func (a *app) applyTopmost() {
+	after := hwndNoTopmost
+	if a.cfg.Topmost {
+		after = hwndTopmost
+	}
+	setWindowPos(a.hwnd, after, 0, 0, 0, 0, swpNoMv|swpNoSz|swpNoActivate)
+	a.syncBackdrop()
+}
+
+func (a *app) setMode(m int) {
+	a.cfg.Mode = ((m % len(modeNames)) + len(modeNames)) % len(modeNames)
+	a.applyFont()
+	invalidate(a.hwnd, nil)
+	invalidate(a.hEdit, nil)
+}
+
+func (a *app) setPalette(p int) {
+	a.cfg.Palette = ((p % len(palettes)) + len(palettes)) % len(palettes)
+	a.applyColors()
+}
+
+// ------------------------------------------------------------- значок в трее
+
+func (a *app) addTrayIcon() {
+	if a.tray.CbSize != 0 {
+		return // уже висит, повторный NIM_ADD не пройдёт
+	}
+	nid := notifyIconData{
+		HWnd:             a.hwnd,
+		UID:              1,
+		UFlags:           nifMessage | nifIcon | nifTip,
+		UCallbackMessage: wmTrayIcon,
+		HIcon:            loadAppIcon(),
+	}
+	nid.CbSize = uint32(unsafe.Sizeof(nid))
+	tip := utf16.Encode([]rune("Glasspad — правый клик: меню, двойной: показать/скрыть"))
+	copy(nid.SzTip[:len(nid.SzTip)-1], tip)
+	a.tray = nid
+	logf("tray add: %v", shellNotifyIcon(nimAdd, &a.tray))
+}
+
+// Значок у часов и кнопка в панели задач — два способа добраться до окна.
+// Выключить оба сразу нельзя: программа стала бы неубиваемой без диспетчера
+// задач, ровно та ловушка, из-за которой всё и переделывалось.
+func (a *app) setTray(on bool) {
+	if !on && !a.cfg.Taskbar {
+		a.setTaskbar(true)
+	}
+	a.cfg.Tray = on
+	if on {
+		a.addTrayIcon()
+	} else {
+		a.removeTrayIcon()
+	}
+}
+
+func (a *app) setTaskbar(on bool) {
+	if !on && !a.cfg.Tray {
+		a.setTray(true)
+	}
+	a.cfg.Taskbar = on
+	// Windows смотрит на эти стили только в момент показа окна, поэтому
+	// его надо спрятать и показать заново.
+	visible := !a.hidden
+	if visible {
+		showWindow(a.hwnd, swHide)
+	}
+	ex := getWindowLong(a.hwnd, gwlExStyle)
+	if on {
+		ex |= wsExAppWindow
+		ex &^= wsExToolWindow
+	} else {
+		ex &^= wsExAppWindow
+		ex |= wsExToolWindow
+	}
+	setWindowLong(a.hwnd, gwlExStyle, ex)
+	if visible {
+		showWindow(a.hwnd, swShow)
+		a.syncBackdrop()
+		setFocus(a.hEdit)
+	}
+}
+
+func (a *app) removeTrayIcon() {
+	if a.tray.CbSize != 0 {
+		shellNotifyIcon(nimDelete, &a.tray)
+		a.tray.CbSize = 0
+	}
+}
+
+// ------------------------------------------------------------ меню настроек
+
+func menuItem(m uintptr, id uintptr, text string, checked bool) {
+	f := uint32(mfString)
+	if checked {
+		f |= mfChecked
+	}
+	appendMenu(m, f, id, text)
+}
+
+// popup показывает меню и сразу выполняет выбранное. Перед показом нужно
+// вывести окно на передний план, после — послать себе холостое сообщение,
+// иначе меню не закроется по клику мимо (давняя особенность Win32).
+func (a *app) popup(m uintptr, x, y int32) {
+	setForegroundWindow(a.hwnd)
+	cmd := trackPopupMenu(m, tpmRetCmd|tpmRight, x, y, a.hwnd)
+	postMessage(a.hwnd, wmNull, 0, 0)
+	destroyMenu(m)
+	if cmd != 0 {
+		a.command(cmd)
+	}
+}
+
+func (a *app) settingsMenu(x, y int32) {
+	m := createPopupMenu()
+	if m == 0 {
+		return
+	}
+
+	sub := createPopupMenu()
+	for i, v := range alphaPresets {
+		menuItem(sub, cmdAlphaBase+uintptr(i), strconv.Itoa(v)+"%", a.cfg.Alpha == v)
+	}
+	appendMenu(m, mfString|mfPopup, sub, "Прозрачность подложки")
+
+	sub = createPopupMenu()
+	for i, v := range fontPresets {
+		menuItem(sub, cmdSizeBase+uintptr(i), strconv.Itoa(v), a.cfg.FontSize == v)
+	}
+	appendMenu(m, mfString|mfPopup, sub, "Размер шрифта")
+
+	sub = createPopupMenu()
+	for i, p := range palettes {
+		menuItem(sub, cmdPalBase+uintptr(i), p.name, a.cfg.Palette == i)
+	}
+	appendMenu(m, mfString|mfPopup, sub, "Цвет букв")
+
+	appendMenu(m, mfSeparator, 0, "")
+	menuItem(m, cmdMode, "Плашка маркера\tCtrl+M", a.cfg.Mode == modeMarker)
+	menuItem(m, cmdTopmost, "Поверх всех окон\tCtrl+T", a.cfg.Topmost)
+	menuItem(m, cmdClickThrough, "Сквозной клик\tCtrl+Alt+E", a.clickThrough)
+	menuItem(m, cmdCompact, "Скрыть эту панель\tCtrl+H", a.cfg.Compact)
+
+	appendMenu(m, mfSeparator, 0, "")
+	menuItem(m, cmdTray, "Значок у часов", a.cfg.Tray)
+	menuItem(m, cmdTaskbar, "Кнопка в панели задач", a.cfg.Taskbar)
+
+	appendMenu(m, mfSeparator, 0, "")
+	menuItem(m, cmdOpen, "Открыть файл…\tCtrl+O", false)
+	menuItem(m, cmdSave, "Сохранить как…\tCtrl+S", false)
+	menuItem(m, cmdOpenDir, "Папка с заметкой", false)
+
+	appendMenu(m, mfSeparator, 0, "")
+	menuItem(m, cmdQuit, "Выход\tCtrl+Q", false)
+
+	a.popup(m, x, y)
+	setFocus(a.hEdit)
+}
+
+func (a *app) trayMenu() {
+	m := createPopupMenu()
+	if m == 0 {
+		return
+	}
+	show := "Свернуть"
+	if a.hidden {
+		show = "Развернуть"
+	}
+	appendMenu(m, mfString, cmdShowHide, show)
+	if a.clickThrough {
+		// Окно сейчас не ловит мышь, панель нажать нельзя — без этого пункта
+		// выключить режим можно было бы только горячей клавишей.
+		appendMenu(m, mfString, cmdClickThrough, "Выключить сквозной клик")
+	}
+	appendMenu(m, mfString, cmdQuit, "Закрыть")
+
+	p := getCursorPos()
+	a.popup(m, p.X, p.Y)
+}
+
+func (a *app) toggleHidden() {
+	a.hidden = !a.hidden
+	if a.hidden {
+		showWindow(a.hwnd, swHide)
+		showWindow(a.hBack, swHide)
+		return
+	}
+	showWindow(a.hBack, swShowNA)
+	showWindow(a.hwnd, swShow)
+	a.syncBackdrop()
+	setFocus(a.hEdit)
+}
+
+func (a *app) setFontSize(v int) {
+	if v < fontMin {
+		v = fontMin
+	}
+	if v > fontMax {
+		v = fontMax
+	}
+	a.cfg.FontSize = v
+	a.applyFont()
+	invalidate(a.hwnd, nil)
+}
+
+func (a *app) stepFont(dir int) {
+	step := 1
+	if a.cfg.FontSize >= 24 {
+		step = 2
+	}
+	a.setFontSize(a.cfg.FontSize + dir*step)
+}
+
+func (a *app) nextFontPreset() {
+	for _, p := range fontPresets {
+		if p > a.cfg.FontSize {
+			a.setFontSize(p)
+			return
+		}
+	}
+	a.setFontSize(fontPresets[0])
+}
+
+func (a *app) toggleCompact() {
+	a.cfg.Compact = !a.cfg.Compact
+	a.layoutChildren()
+	invalidate(a.hwnd, nil)
+}
+
+func (a *app) toggleClickThrough() {
+	a.clickThrough = !a.clickThrough
+	ex := getWindowLong(a.hwnd, gwlExStyle)
+	if a.clickThrough {
+		ex |= wsExTransparent
+	} else {
+		ex &^= wsExTransparent
+	}
+	setWindowLong(a.hwnd, gwlExStyle, ex)
+	a.updateBackdropHitTest()
+	invalidate(a.hwnd, nil)
+}
+
+// ---------------------------------------------------------------- отрисовка
+
+func (a *app) buildBar(hdc uintptr, width int32) {
+	pal := palettes[a.cfg.Palette%len(palettes)]
+	a.items = a.items[:0]
+
+	pad := a.scale(7)
+	x := a.scale(10)
+
+	// ползунок прозрачности
+	sw := a.scale(110)
+	a.sliderRect = rect{x, (a.barH - a.scale(14)) / 2, x + sw, (a.barH + a.scale(14)) / 2}
+	x += sw + a.scale(6)
+
+	add := func(cmd int32, label string, fg, bg uint32) {
+		w := textWidth(hdc, label) + 2*pad
+		a.items = append(a.items, barItem{cmd, label, rect{x, 0, x + w, a.barH}, fg, bg})
+		x += w
+	}
+
+	add(-1, strconv.Itoa(a.cfg.Alpha)+"%", dimFG, barBG)
+	add(cmdFontDown, "−", barFG, barBG)
+	add(cmdFontPreset, strconv.Itoa(a.cfg.FontSize), barFG, barBG)
+	add(cmdFontUp, "+", barFG, barBG)
+	add(cmdBW, " Aa ", pal.fg, pal.marker)
+	add(cmdMode, modeNames[a.cfg.Mode], barFG, barBG)
+
+	// «Поверх» и «Сквозной» переехали в настройки: с ними панель не влезала
+	// в окно по умолчанию. Здесь остаётся только то, что крутят постоянно.
+	settingsFG := uint32(barFG)
+	if a.clickThrough {
+		settingsFG = 0x6B6BFF // сквозной клик включён — заметное состояние
+	}
+	add(cmdSettings, "Настройки", settingsFG, barBG)
+
+	// «✕» прижимаем вправо
+	w := textWidth(hdc, "✕") + 2*pad
+	a.items = append(a.items, barItem{cmdQuit, "✕", rect{width - w, 0, width, a.barH}, barFG, barBG})
+}
+
+// paint принимает hwnd параметром, а не берёт a.hwnd: сообщение может прийти
+// ещё изнутри CreateWindowEx, когда поле структуры не заполнено.
+func (a *app) paint(hwnd uintptr) {
+	var ps paintStruct
+	hdc := beginPaint(hwnd, &ps)
+	c := getClientRect(hwnd)
+
+	// поля вокруг поля ввода — фоном окна
+	full := rect{0, 0, c.w(), c.h()}
+	fillRect(hdc, &full, a.bgBrush)
+
+	if !a.cfg.Compact {
+		mem := createCompatibleDC(hdc)
+		bmp := createCompatibleBitmap(hdc, c.w(), a.barH)
+		oldBmp := selectObject(mem, bmp)
+		oldFont := selectObject(mem, a.barFont)
+
+		bar := rect{0, 0, c.w(), a.barH}
+		fillRect(mem, &bar, a.barBrush)
+		a.buildBar(mem, c.w())
+
+		// ползунок
+		tr := a.sliderRect
+		track := rect{tr.Left, tr.Top + tr.h()/2 - a.scale(2), tr.Right, tr.Top + tr.h()/2 + a.scale(2)}
+		fillRect(mem, &track, a.trackBrush)
+		kw := a.scale(10)
+		kx := tr.Left + (tr.w()-kw)*int32(a.cfg.Alpha)/100
+		knob := rect{kx, tr.Top, kx + kw, tr.Bottom}
+		fillRect(mem, &knob, a.knobBrush)
+
+		setBkMode(mem, transparentBkMode)
+		for _, it := range a.items {
+			if it.bg != barBG {
+				r := it.r
+				fillRect(mem, &r, brushFor(it.bg))
+			}
+			setTextColor(mem, it.fg)
+			r := it.r
+			drawText(mem, it.label, &r, dtSingleLine|dtVCenter|dtCenter)
+		}
+
+		bitBlt(hdc, 0, 0, c.w(), a.barH, mem, 0, 0, srcCopy)
+		selectObject(mem, oldFont)
+		selectObject(mem, oldBmp)
+		deleteObject(bmp)
+		deleteDC(mem)
+	}
+	endPaint(hwnd, &ps)
+}
+
+// brushFor — кисть под цвет образца «Aa»; кэш на один цвет, больше и не нужно.
+var (
+	cachedBrushColor uint32 = 0xFFFFFFFF
+	cachedBrush      uintptr
+)
+
+func brushFor(c uint32) uintptr {
+	if c != cachedBrushColor {
+		deleteObject(cachedBrush)
+		cachedBrush = createSolidBrush(c)
+		cachedBrushColor = c
+	}
+	return cachedBrush
+}
+
+// ------------------------------------------------------------------- мышь
+
+func (a *app) hitTest(hwnd uintptr, x, y int32) int32 {
+	c := getClientRect(hwnd)
+	if c.w() == 0 || c.h() == 0 {
+		return htClient
+	}
+	b := a.scale(6)
+	// Сверху полоска для растягивания тоньше — иначе она съедает верх кнопок.
+	bt := a.scale(3)
+	left, right := x < b, x >= c.w()-b
+	top, bottom := y < bt, y >= c.h()-b
+
+	switch {
+	case bottom && right:
+		return htBottomRight
+	case bottom && left:
+		return htBottomLeft
+	case top && left:
+		return htTopLeft
+	case top && right:
+		return htTopRight
+	case bottom:
+		return htBottom
+	case top:
+		return htTop
+	case left:
+		return htLeft
+	case right:
+		return htRight
+	}
+	if !a.cfg.Compact && y < a.barH {
+		if a.sliderRect.has(x, y) {
+			return htClient
+		}
+		for _, it := range a.items {
+			if it.r.has(x, y) {
+				return htClient
+			}
+		}
+		return htCaption // пустое место панели — таскаем окно
+	}
+	return htClient
+}
+
+func (a *app) onLButtonDown(x, y int32) {
+	if a.cfg.Compact || y >= a.barH {
+		return
+	}
+	if a.sliderRect.has(x, y) {
+		a.draggingSlider = true
+		setCapture(a.hwnd)
+		a.alphaFromX(x)
+		return
+	}
+	for _, it := range a.items {
+		if it.cmd > 0 && it.r.has(x, y) {
+			if it.cmd == cmdSettings {
+				// Меню разворачивается от нижнего края кнопки. Клиентская
+				// область равна всему окну, так что смещение — это его угол.
+				wr := getWindowRect(a.hwnd)
+				a.settingsMenu(wr.Left+it.r.Left, wr.Top+a.barH)
+				return
+			}
+			a.command(it.cmd)
+			setFocus(a.hEdit)
+			return
+		}
+	}
+}
+
+func (a *app) onRButtonUp(x, y int32) {
+	if a.cfg.Compact || y >= a.barH {
+		return
+	}
+	for _, it := range a.items {
+		if it.cmd == cmdBW && it.r.has(x, y) {
+			a.setPalette(a.cfg.Palette + 1) // ПКМ по «Aa» — цвета по кругу
+			return
+		}
+	}
+}
+
+func (a *app) alphaFromX(x int32) {
+	tr := a.sliderRect
+	kw := a.scale(10)
+	v := int((x - tr.Left - kw/2) * 100 / max32(1, tr.w()-kw))
+	a.applyAlpha(v)
+}
+
+func max32(a, b int32) int32 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// --------------------------------------------------------------- команды
+
+func (a *app) command(cmd int32) {
+	// Пункты подменю приходят диапазонами.
+	switch {
+	case cmd >= cmdPalBase && cmd < cmdPalBase+int32(len(palettes)):
+		a.setPalette(int(cmd - cmdPalBase))
+		return
+	case cmd >= cmdSizeBase && cmd < cmdSizeBase+int32(len(fontPresets)):
+		a.setFontSize(fontPresets[cmd-cmdSizeBase])
+		return
+	case cmd >= cmdAlphaBase && cmd < cmdAlphaBase+int32(len(alphaPresets)):
+		a.applyAlpha(alphaPresets[cmd-cmdAlphaBase])
+		return
+	}
+
+	switch cmd {
+	case cmdMode:
+		a.setMode(a.cfg.Mode + 1)
+	case cmdPalette:
+		a.setPalette(a.cfg.Palette + 1)
+	case cmdBW:
+		if a.cfg.Palette == 1 {
+			a.setPalette(0)
+		} else {
+			a.setPalette(1)
+		}
+	case cmdTopmost:
+		a.cfg.Topmost = !a.cfg.Topmost
+		a.applyTopmost()
+		invalidate(a.hwnd, nil)
+	case cmdCompact:
+		a.toggleCompact()
+	case cmdClickThrough:
+		a.toggleClickThrough()
+	case cmdAlphaUp:
+		a.applyAlpha(a.cfg.Alpha + 5)
+	case cmdAlphaDown:
+		a.applyAlpha(a.cfg.Alpha - 5)
+	case cmdFontUp:
+		a.stepFont(1)
+	case cmdFontDown:
+		a.stepFont(-1)
+	case cmdFontPreset:
+		a.nextFontPreset()
+	case cmdOpen:
+		a.openFile()
+	case cmdSave:
+		a.saveAs()
+	case cmdShowHide:
+		a.toggleHidden()
+	case cmdSettings:
+		p := getCursorPos()
+		a.settingsMenu(p.X, p.Y)
+	case cmdTray:
+		a.setTray(!a.cfg.Tray)
+	case cmdTaskbar:
+		a.setTaskbar(!a.cfg.Taskbar)
+	case cmdOpenDir:
+		shellOpen(a.dataDir)
+	case cmdQuit:
+		destroyWindow(a.hwnd)
+	}
+}
+
+func accelTable() []accel {
+	k := func(vk uint16, cmd uint16, alt bool) accel {
+		f := byte(fVirtKey | fControl)
+		if alt {
+			f |= fAlt
+		}
+		return accel{FVirt: f, Key: vk, Cmd: cmd}
+	}
+	return []accel{
+		k('M', cmdMode, false),
+		k('P', cmdPalette, false),
+		k('T', cmdTopmost, false),
+		k('H', cmdCompact, false),
+		k('O', cmdOpen, false),
+		k('S', cmdSave, false),
+		k('Q', cmdQuit, false),
+		k(0x26, cmdAlphaUp, false),   // VK_UP
+		k(0x28, cmdAlphaDown, false), // VK_DOWN
+		k(0xBB, cmdFontUp, false),    // VK_OEM_PLUS
+		k(0xBD, cmdFontDown, false),  // VK_OEM_MINUS
+		k(0x6B, cmdFontUp, false),    // VK_ADD
+		k(0x6D, cmdFontDown, false),  // VK_SUBTRACT
+		k('E', cmdClickThrough, true),
+	}
+}
+
+func (a *app) registerHotKeys() {
+	// Глобальные — чтобы вернуть окно, когда прозрачность 0% или включён
+	// сквозной клик и мышью до окна не дотянуться.
+	registerHotKey(a.hwnd, hkAlphaUp, modControl|modAlt, 0x26)
+	registerHotKey(a.hwnd, hkAlphaDown, modControl|modAlt, 0x28)
+	registerHotKey(a.hwnd, hkClickThrough, modControl|modAlt|modNoRepeat, 'E')
+	registerHotKey(a.hwnd, hkHideAll, modControl|modAlt|modNoRepeat, 'H')
+}
+
+func (a *app) unregisterHotKeys() {
+	for id := int32(hkAlphaUp); id <= hkHideAll; id++ {
+		unregisterHotKey(a.hwnd, id)
+	}
+}
+
+// ----------------------------------------------------------------- текст
+
+func (a *app) text() string {
+	n := int(sendMessage(a.hEdit, wmGetTextLength, 0, 0))
+	if n == 0 {
+		return ""
+	}
+	buf := make([]uint16, n+1)
+	sendMessage(a.hEdit, wmGetText, uintptr(n+1), uintptr(unsafe.Pointer(&buf[0])))
+	runtime.KeepAlive(buf)
+	return syscall.UTF16ToString(buf)
+}
+
+func (a *app) setText(s string) {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\n", "\r\n")
+	p := str16(s)
+	sendMessage(a.hEdit, wmSetText, 0, uintptr(unsafe.Pointer(p)))
+	runtime.KeepAlive(p)
+}
+
+// Текст первого запуска: программа приходит одним файлом, без сопроводиловки,
+// поэтому пусть объясняет себя сама. Стирается как обычный текст.
+const welcomeNote = `Glasspad — заметка поверх всех окон.
+
+Как закрыть: крестик справа в панельке, Alt+F4,
+или правый клик по значку у часов -> Выход.
+
+Панель сверху:
+  ползунок   прозрачность подложки. Буквы не выцветают никогда
+  - 16 +     размер шрифта, 8-72. Клик по числу — по размерам
+  Aa         белые/чёрные буквы. Правой кнопкой — цвета
+  Маркер     плашка под буквами, чтобы читалось на любом фоне
+  Настройки  всё остальное: поверх окон, сквозной клик, трей,
+             кнопка в панели задач, цвета, файлы, выход
+
+Двигать — за пустое место панели. Размер — за края и углы.
+Ctrl+H прячет панель, Ctrl+Alt+H — всё окно целиком.
+Текст сохраняется сам, каждые 5 секунд.
+
+Этот текст можно стереть.`
+
+func (a *app) loadNote() {
+	data, err := os.ReadFile(a.notePath)
+	if err != nil {
+		a.setText(welcomeNote)
+		a.savedText = a.text()
+		return
+	}
+	a.setText(string(data))
+	a.savedText = a.text()
+}
+
+// saveNote читает текст в потоке сообщений, а пишет на диск в стороне: если
+// антивирус или диск задумаются на секунду, окно не должно застывать вместе
+// с ними — иначе Windows объявит его зависшим.
+func (a *app) saveNote() {
+	t := a.text()
+	if t == a.savedText {
+		return
+	}
+	a.savedText = t
+	out := strings.ReplaceAll(t, "\r\n", "\n")
+	path := a.notePath
+	go func() { os.WriteFile(path, []byte(out), 0o644) }()
+}
+
+func (a *app) saveNoteSync() {
+	t := a.text()
+	a.savedText = t
+	os.WriteFile(a.notePath, []byte(strings.ReplaceAll(t, "\r\n", "\n")), 0o644)
+}
+
+func (a *app) openFile() {
+	path := fileDialog(a.hwnd, false, "txt")
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		messageBox(a.hwnd, "Не удалось открыть файл:\n"+path, appTitle, 0x10)
+		return
+	}
+	a.setText(string(data))
+}
+
+func (a *app) saveAs() {
+	path := fileDialog(a.hwnd, true, "txt")
+	if path == "" {
+		return
+	}
+	out := strings.ReplaceAll(a.text(), "\r\n", "\n")
+	if os.WriteFile(path, []byte(out), 0o644) != nil {
+		messageBox(a.hwnd, "Не удалось сохранить файл:\n"+path, appTitle, 0x10)
+	}
+}
+
+// --------------------------------------------------------------- настройки
+
+func loadConfig(path string) config {
+	cfg := defaultConfig()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return defaultConfig()
+	}
+	if cfg.Alpha < 0 || cfg.Alpha > 100 {
+		cfg.Alpha = 80
+	}
+	if cfg.Mode < 0 || cfg.Mode >= len(modeNames) {
+		cfg.Mode = modeMarker // сюда же попадает старый режим «Текст» = 2
+	}
+	if cfg.Palette < 0 || cfg.Palette >= len(palettes) {
+		cfg.Palette = 0
+	}
+	if cfg.FontSize < fontMin || cfg.FontSize > fontMax {
+		cfg.FontSize = 16
+	}
+	if !cfg.Tray && !cfg.Taskbar {
+		cfg.Tray = true // до окна всегда должен быть хоть один путь
+	}
+	if cfg.W < 220 {
+		cfg.W = 560
+	}
+	if cfg.H < 120 {
+		cfg.H = 360
+	}
+	return cfg
+}
+
+func (a *app) saveConfig() {
+	r := getWindowRect(a.hwnd)
+	a.cfg.X, a.cfg.Y = int(r.Left), int(r.Top)
+	a.cfg.W, a.cfg.H = int(r.w()), int(r.h())
+	if data, err := json.MarshalIndent(a.cfg, "", "  "); err == nil {
+		os.WriteFile(a.cfgPath, data, 0o644)
+	}
+}
+
+// ------------------------------------------------------------- оконная процедура
+
+// backProc — окно-подложка. Ничего не умеет, кроме как закрасить себя целиком:
+// вся его роль в том, что LWA_ALPHA применяется к нему, а не к тексту.
+func backProc(hwnd, m, wp, lp uintptr) uintptr {
+	switch m {
+	case wmEraseBkgnd:
+		return 1
+
+	case wmLButtonDown:
+		// Клик по подложке = клик по заметке: поднимаем окно и уводим фокус
+		// в текст, чтобы можно было сразу печатать.
+		if a.hwnd != 0 {
+			setForegroundWindow(a.hwnd)
+			setFocus(a.hEdit)
+		}
+		return 0
+	case wmPaint:
+		var ps paintStruct
+		hdc := beginPaint(hwnd, &ps)
+		c := getClientRect(hwnd)
+		r := rect{0, 0, c.w(), c.h()}
+		if a.backBrush != 0 {
+			fillRect(hdc, &r, a.backBrush)
+		}
+		endPaint(hwnd, &ps)
+		return 0
+	}
+	return defWindowProc(hwnd, uint32(m), wp, lp)
+}
+
+// Все параметры — uintptr: syscall.NewCallback принимает только аргументы
+// размером со слово, uint32 здесь дал бы панику при регистрации коллбэка.
+func wndProc(hwnd, m, wp, lp uintptr) uintptr {
+	seq := logMsgIn("main", m)
+	defer logMsgOut(seq, m)
+
+	switch m {
+	case wmNCCalcSize:
+		if wp != 0 {
+			return 0 // клиентская область = всё окно, рамку рисуем сами
+		}
+
+	case wmNCHitTest:
+		p := point{loWord(lp), hiWord(lp)}
+		wr := getWindowRect(hwnd)
+		return uintptr(a.hitTest(hwnd, p.X-wr.Left, p.Y-wr.Top))
+
+	case wmGetMinMaxInfo:
+		// go vet ругается на unsafe.Pointer(lp) — здесь это нормально:
+		// lParam и есть указатель на MINMAXINFO, выданный системой.
+		mmi := (*minMaxInfo)(unsafe.Pointer(lp))
+		mmi.PtMinTrackSize = point{a.scale(260), a.scale(90)}
+		return 0
+
+	case wmEraseBkgnd:
+		return 1
+
+	case wmPaint:
+		a.paint(hwnd)
+		return 0
+
+	case wmSize:
+		a.layoutChildren()
+		invalidate(hwnd, nil)
+		return 0
+
+	case wmWindowPosChgd:
+		// Одно сообщение и на перемещение, и на изменение размера, и на смену
+		// z-порядка — подложке достаточно этого, чтобы никогда не отставать.
+		a.syncBackdrop()
+		return defWindowProc(hwnd, uint32(m), wp, lp)
+
+	// WM_CTLCOLORSTATIC — на случай, если система решит красить поле как
+	// статику: цвета должны быть те же, иначе фон станет системным белым.
+	case wmCtlColorEdit, wmCtlColorStat:
+		pal := palettes[a.cfg.Palette%len(palettes)]
+		setTextColor(wp, pal.fg)
+		if a.cfg.Mode == modeMarker {
+			setBkColor(wp, pal.marker) // непрозрачная плашка под буквами
+			setBkMode(wp, opaqueBkMode)
+		} else {
+			setBkMode(wp, transparentBkMode)
+		}
+		return a.bgBrush // ключевой цвет: сквозь фон видно подложку
+
+	case wmLButtonDown:
+		a.onLButtonDown(loWord(lp), hiWord(lp))
+		return 0
+
+	case wmMouseMove:
+		if a.draggingSlider {
+			a.alphaFromX(loWord(lp))
+		}
+		return 0
+
+	case wmLButtonUp:
+		if a.draggingSlider {
+			a.draggingSlider = false
+			releaseCapture()
+		}
+		return 0
+
+	case wmRButtonUp:
+		a.onRButtonUp(loWord(lp), hiWord(lp))
+		return 0
+
+	case wmCommand:
+		a.command(int32(loWord(wp)))
+		return 0
+
+	case wmTrayIcon:
+		switch uint32(lp) {
+		case wmRButtonUp, 0x0204: // правая кнопка — меню
+			a.trayMenu()
+		case 0x0203: // двойной левый клик — показать/спрятать
+			a.toggleHidden()
+		}
+		return 0
+
+	case wmHotKey:
+		switch int32(wp) {
+		case hkAlphaUp:
+			a.applyAlpha(a.cfg.Alpha + 5)
+		case hkAlphaDown:
+			a.applyAlpha(a.cfg.Alpha - 5)
+		case hkClickThrough:
+			a.toggleClickThrough()
+		case hkHideAll:
+			a.toggleHidden()
+		}
+		return 0
+
+	case wmTimer:
+		switch wp {
+		case timerSave:
+			a.saveNote()
+		case timerBeat:
+			// Пульс: пока эти строки идут, цикл сообщений жив. Если журнал
+			// обрывается на «IN #N» без «OUT #N» — встали на том сообщении.
+			a.beats++
+			logf("пульс %d", a.beats)
+		}
+		return 0
+
+	case wmSetFocusMsg:
+		if a.hEdit != 0 {
+			setFocus(a.hEdit)
+		}
+		return 0
+
+	case wmClose:
+		destroyWindow(hwnd)
+		return 0
+
+	case wmDestroy:
+		logf("WM_DESTROY: сохраняюсь и выхожу")
+		a.saveNoteSync()
+		a.saveConfig()
+		a.removeTrayIcon()
+		a.unregisterHotKeys()
+		if a.hBack != 0 {
+			destroyWindow(a.hBack)
+			a.hBack = 0
+		}
+		postQuitMessage(0)
+		return 0
+	}
+	return defWindowProc(hwnd, uint32(m), wp, lp)
+}
