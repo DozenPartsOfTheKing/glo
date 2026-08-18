@@ -489,12 +489,15 @@ func textWidth(hdc uintptr, text string) int32 {
 	return sz.CX
 }
 
+// bErase=TRUE: иначе смена шрифта, размера или палитры оставляет под новым
+// текстом старый — область помечается грязной, но фон под ней не стирается.
+// Главному окну и подложке это ничего не стоит, они гасят WM_ERASEBKGND.
 func invalidate(h uintptr, r *rect) {
 	var p uintptr
 	if r != nil {
 		p = uintptr(unsafe.Pointer(r))
 	}
-	pInvalidateRect.Call(h, p, 0)
+	pInvalidateRect.Call(h, p, 1)
 }
 
 func setCapture(h uintptr) { pSetCapture.Call(h) }

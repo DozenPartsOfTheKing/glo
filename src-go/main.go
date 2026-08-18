@@ -1159,12 +1159,18 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmCtlColorEdit, wmCtlColorStat:
 		pal := palettes[a.cfg.Palette%len(palettes)]
 		setTextColor(wp, pal.fg)
+		// Режим фона всегда непрозрачный. EDIT перерисовывает изменённую
+		// строку одним TextOut и рассчитывает, что тот сам затрёт старые
+		// пиксели фоновым цветом; при transparentBkMode затирания нет, и
+		// стёртая буква остаётся на экране, а новая ложится поверх неё.
+		// Вне маркера фоновый цвет = ключевой, то есть прозрачный: вид
+		// прежний, а старые глифы уходят.
+		bk := colorKey
 		if a.cfg.Mode == modeMarker {
-			setBkColor(wp, pal.marker) // непрозрачная плашка под буквами
-			setBkMode(wp, opaqueBkMode)
-		} else {
-			setBkMode(wp, transparentBkMode)
+			bk = pal.marker // непрозрачная плашка под буквами
 		}
+		setBkColor(wp, bk)
+		setBkMode(wp, opaqueBkMode)
 		return a.bgBrush // ключевой цвет: сквозь фон видно подложку
 
 	case wmLButtonDown:
