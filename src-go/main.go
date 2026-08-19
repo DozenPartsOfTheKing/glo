@@ -182,6 +182,7 @@ type app struct {
 	margin                           int32
 
 	editFont, barFont, glowFont uintptr
+	menuFont                    uintptr
 	bgBrush, barBrush           uintptr
 	backBrush                   uintptr
 	trackBrush, knobBrush       uintptr
@@ -324,6 +325,13 @@ func (a *app) registerClass() {
 	glow.LpfnWndProc = syscall.NewCallback(defProc)
 	glow.LpszClassName = str16(glowClass)
 	registerClass(&glow)
+
+	// Меню — такое же слоёное окно, как сияние, но с мышью: пока оно
+	// открыто, захват мыши держит корневое окно меню.
+	mn := wc
+	mn.LpfnWndProc = syscall.NewCallback(menuProc)
+	mn.LpszClassName = str16(menuClass)
+	registerClass(&mn)
 }
 
 func defProc(hwnd, m, wp, lp uintptr) uintptr {
@@ -381,6 +389,10 @@ func (a *app) createWindows() {
 	a.knobPen = createPen(knobBG, 1)
 	a.lineBrush = createSolidBrush(shade(barBG, 26))
 	a.barFont = createFont(-a.scale(12), 400, 5, "Segoe UI")
+	// Меню лежит на попиксельно-прозрачном холсте, и ClearType на нём
+	// оставил бы цветную кайму: субпиксели рассчитаны на плотный фон.
+	// Отсюда ANTIALIASED_QUALITY — ровно как у шрифта сияния.
+	a.menuFont = createFont(-a.scale(13), 400, 4, "Segoe UI")
 	a.layoutChildren()
 }
 
@@ -642,95 +654,69 @@ func (a *app) removeTrayIcon() {
 
 // ------------------------------------------------------------ меню настроек
 
-func menuItem(m uintptr, id uintptr, text string, checked bool) {
-	f := uint32(mfString)
-	if checked {
-		f |= mfChecked
+func (a *app) settingsMenu(x, y int32) {
+	alpha := make([]mItem, 0, len(alphaPresets))
+	for i, v := range alphaPresets {
+		alpha = append(alpha, mItem{cmd: cmdAlphaBase + int32(i),
+			label: strconv.Itoa(v) + "%", check: a.cfg.Alpha == v})
 	}
-	appendMenu(m, f, id, text)
-}
+	sizes := make([]mItem, 0, len(fontPresets))
+	for i, v := range fontPresets {
+		sizes = append(sizes, mItem{cmd: cmdSizeBase + int32(i),
+			label: strconv.Itoa(v), check: a.cfg.FontSize == v})
+	}
+	colors := make([]mItem, 0, len(palettes))
+	for i, p := range palettes {
+		colors = append(colors, mItem{cmd: cmdPalBase + int32(i),
+			label: p.name, check: a.cfg.Palette == i})
+	}
 
-// popup показывает меню и сразу выполняет выбранное. Перед показом нужно
-// вывести окно на передний план, после — послать себе холостое сообщение,
-// иначе меню не закроется по клику мимо (давняя особенность Win32).
-func (a *app) popup(m uintptr, x, y int32) {
-	setForegroundWindow(a.hwnd)
-	cmd := trackPopupMenu(m, tpmRetCmd|tpmRight, x, y, a.hwnd)
-	postMessage(a.hwnd, wmNull, 0, 0)
-	destroyMenu(m)
-	if cmd != 0 {
+	items := []mItem{
+		{label: "Прозрачность подложки", sub: alpha},
+		{label: "Размер шрифта", sub: sizes},
+		{label: "Цвет букв", sub: colors},
+		{sep: true},
+		{cmd: cmdGlow, label: "Сияние букв", accel: "Ctrl+G", check: a.cfg.Glow},
+		{cmd: cmdMode, label: "Плашка маркера", accel: "Ctrl+M", check: a.cfg.Mode == modeMarker},
+		{cmd: cmdBlur, label: "Матовое стекло", check: a.cfg.Blur},
+		{cmd: cmdTopmost, label: "Поверх всех окон", accel: "Ctrl+T", check: a.cfg.Topmost},
+		{cmd: cmdDropBelow, label: "Двойной щелчок уводит окно вниз", check: a.cfg.DropBelow},
+		{cmd: cmdClickThrough, label: "Сквозной клик насовсем", accel: "Ctrl+Alt+E", check: a.clickThrough},
+		{cmd: cmdCompact, label: "Скрыть эту панель", accel: "Ctrl+H", check: a.cfg.Compact},
+		{sep: true},
+		{cmd: cmdTray, label: "Значок у часов", check: a.cfg.Tray},
+		{cmd: cmdTaskbar, label: "Кнопка в панели задач", check: a.cfg.Taskbar},
+		{sep: true},
+		{cmd: cmdOpen, label: "Открыть файл…", accel: "Ctrl+O"},
+		{cmd: cmdSave, label: "Сохранить как…", accel: "Ctrl+S"},
+		{cmd: cmdOpenDir, label: "Папка с заметкой"},
+		{sep: true},
+		{cmd: cmdQuit, label: "Выход", accel: "Ctrl+Q"},
+	}
+
+	if cmd := a.trackMenu(items, x, y); cmd != 0 {
 		a.command(cmd)
 	}
-}
-
-func (a *app) settingsMenu(x, y int32) {
-	m := createPopupMenu()
-	if m == 0 {
-		return
-	}
-
-	sub := createPopupMenu()
-	for i, v := range alphaPresets {
-		menuItem(sub, cmdAlphaBase+uintptr(i), strconv.Itoa(v)+"%", a.cfg.Alpha == v)
-	}
-	appendMenu(m, mfString|mfPopup, sub, "Прозрачность подложки")
-
-	sub = createPopupMenu()
-	for i, v := range fontPresets {
-		menuItem(sub, cmdSizeBase+uintptr(i), strconv.Itoa(v), a.cfg.FontSize == v)
-	}
-	appendMenu(m, mfString|mfPopup, sub, "Размер шрифта")
-
-	sub = createPopupMenu()
-	for i, p := range palettes {
-		menuItem(sub, cmdPalBase+uintptr(i), p.name, a.cfg.Palette == i)
-	}
-	appendMenu(m, mfString|mfPopup, sub, "Цвет букв")
-
-	appendMenu(m, mfSeparator, 0, "")
-	menuItem(m, cmdGlow, "Сияние букв\tCtrl+G", a.cfg.Glow)
-	menuItem(m, cmdMode, "Плашка маркера\tCtrl+M", a.cfg.Mode == modeMarker)
-	menuItem(m, cmdBlur, "Матовое стекло", a.cfg.Blur)
-	menuItem(m, cmdTopmost, "Поверх всех окон\tCtrl+T", a.cfg.Topmost)
-	menuItem(m, cmdDropBelow, "Двойной щелчок уводит окно вниз", a.cfg.DropBelow)
-	menuItem(m, cmdClickThrough, "Сквозной клик насовсем\tCtrl+Alt+E", a.clickThrough)
-	menuItem(m, cmdCompact, "Скрыть эту панель\tCtrl+H", a.cfg.Compact)
-
-	appendMenu(m, mfSeparator, 0, "")
-	menuItem(m, cmdTray, "Значок у часов", a.cfg.Tray)
-	menuItem(m, cmdTaskbar, "Кнопка в панели задач", a.cfg.Taskbar)
-
-	appendMenu(m, mfSeparator, 0, "")
-	menuItem(m, cmdOpen, "Открыть файл…\tCtrl+O", false)
-	menuItem(m, cmdSave, "Сохранить как…\tCtrl+S", false)
-	menuItem(m, cmdOpenDir, "Папка с заметкой", false)
-
-	appendMenu(m, mfSeparator, 0, "")
-	menuItem(m, cmdQuit, "Выход\tCtrl+Q", false)
-
-	a.popup(m, x, y)
 	setFocus(a.hEdit)
 }
 
 func (a *app) trayMenu() {
-	m := createPopupMenu()
-	if m == 0 {
-		return
-	}
 	show := "Свернуть"
 	if a.hidden {
 		show = "Развернуть"
 	}
-	appendMenu(m, mfString, cmdShowHide, show)
+	items := []mItem{{cmd: cmdShowHide, label: show}}
 	if a.clickThrough {
 		// Окно сейчас не ловит мышь, панель нажать нельзя — без этого пункта
 		// выключить режим можно было бы только горячей клавишей.
-		appendMenu(m, mfString, cmdClickThrough, "Выключить сквозной клик")
+		items = append(items, mItem{cmd: cmdClickThrough, label: "Выключить сквозной клик"})
 	}
-	appendMenu(m, mfString, cmdQuit, "Закрыть")
+	items = append(items, mItem{cmd: cmdQuit, label: "Закрыть"})
 
 	p := getCursorPos()
-	a.popup(m, p.X, p.Y)
+	if cmd := a.trackMenu(items, p.X, p.Y); cmd != 0 {
+		a.command(cmd)
+	}
 }
 
 func (a *app) toggleHidden() {

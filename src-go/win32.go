@@ -57,10 +57,6 @@ var (
 	pCreateAccelTable    = user32.NewProc("CreateAcceleratorTableW")
 	pTranslateAccel      = user32.NewProc("TranslateAcceleratorW")
 	pLoadCursor          = user32.NewProc("LoadCursorW")
-	pCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
-	pAppendMenu          = user32.NewProc("AppendMenuW")
-	pTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
-	pDestroyMenu         = user32.NewProc("DestroyMenu")
 	pGetCursorPos        = user32.NewProc("GetCursorPos")
 	pSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	pMessageBox          = user32.NewProc("MessageBoxW")
@@ -165,6 +161,7 @@ const (
 	dtSingleLine = 0x20
 	dtVCenter    = 0x04
 	dtCenter     = 0x01
+	dtRight      = 0x02
 	dtLeft       = 0x00
 
 	transparentBkMode = 1
@@ -176,16 +173,9 @@ const (
 	modControl  = 0x0002
 	modNoRepeat = 0x4000
 
-	fVirtKey  = 0x01
-	fControl  = 0x08
-	fAlt      = 0x10
-	tpmRetCmd = 0x0100
-	tpmRight  = 0x0002
-
-	mfString    = 0x0000
-	mfSeparator = 0x0800
-	mfChecked   = 0x0008
-	mfPopup     = 0x0010
+	fVirtKey = 0x01
+	fControl = 0x08
+	fAlt     = 0x10
 
 	nimAdd     = 0
 	nimModify  = 1
@@ -551,28 +541,6 @@ func loadCursorArrow() uintptr {
 	c, _, _ := pLoadCursor.Call(0, uintptr(idcArrow))
 	return c
 }
-
-func createPopupMenu() uintptr {
-	m, _, _ := pCreatePopupMenu.Call()
-	return m
-}
-
-func appendMenu(menu uintptr, flags uint32, id uintptr, text string) {
-	var p uintptr
-	t := str16(text)
-	if flags&mfSeparator == 0 {
-		p = uintptr(unsafe.Pointer(t))
-	}
-	pAppendMenu.Call(menu, uintptr(flags), id, p)
-	runtime.KeepAlive(t)
-}
-
-func trackPopupMenu(menu uintptr, flags uint32, x, y int32, hwnd uintptr) int32 {
-	r, _, _ := pTrackPopupMenu.Call(menu, uintptr(flags), uintptr(x), uintptr(y), 0, hwnd, 0)
-	return int32(r)
-}
-
-func destroyMenu(m uintptr) { pDestroyMenu.Call(m) }
 
 func getCursorPos() point {
 	var p point
