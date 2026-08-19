@@ -196,6 +196,15 @@ const (
 	wmTrayIcon = 0x8001 // WM_APP + 1
 	wmNull     = 0x0000
 
+	wmSetIcon = 0x0080
+	iconSmall = 0
+	iconBig   = 1
+
+	smCXIcon   = 11
+	smCYIcon   = 12
+	smCXSmIcon = 49
+	smCYSmIcon = 50
+
 	srcCopy = 0x00CC0020
 
 	ofnFileMustExist  = 0x00001000
@@ -395,8 +404,11 @@ func getWindowLong(h uintptr, idx int32) uintptr {
 	return r
 }
 
-func setWindowLong(h uintptr, idx int32, v uintptr) {
-	pSetWindowLongPtr.Call(h, uintptr(idx), v)
+// Возвращает прежнее значение — на нём держится подмена оконной процедуры
+// поля ввода.
+func setWindowLong(h uintptr, idx int32, v uintptr) uintptr {
+	r, _, _ := pSetWindowLongPtr.Call(h, uintptr(idx), v)
+	return r
 }
 
 func setWindowPos(h, after uintptr, x, y, w, ht int32, flags uint32) {
@@ -434,9 +446,22 @@ func postMessage(h uintptr, m uint32, wp, lp uintptr) {
 	pPostMessage.Call(h, uintptr(m), wp, lp)
 }
 
-func loadAppIcon() uintptr {
+// Значок берётся из ресурса самого exe (id 1, собирается icon/make_icon.py).
+// Если ресурса почему-то нет — системный, чтобы в трее не было пустоты.
+func loadAppIcon(inst uintptr, cx, cy int32) uintptr {
+	if i := loadIconRes(inst, 1, cx, cy); i != 0 {
+		return i
+	}
 	i, _, _ := pLoadIcon.Call(0, uintptr(idiApp))
 	return i
+}
+
+func smallIcon(inst uintptr) uintptr {
+	return loadAppIcon(inst, getSystemMetrics(smCXSmIcon), getSystemMetrics(smCYSmIcon))
+}
+
+func bigIcon(inst uintptr) uintptr {
+	return loadAppIcon(inst, getSystemMetrics(smCXIcon), getSystemMetrics(smCYIcon))
 }
 
 func shellOpen(path string) {

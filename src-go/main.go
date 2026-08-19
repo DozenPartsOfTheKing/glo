@@ -19,15 +19,23 @@ import (
 var colorKey = rgb(255, 0, 254)
 
 const (
-	barBG     = 0x221C1C // COLORREF = 0x00BBGGRR
-	barFG     = 0xAAA09A
+	barBG     = 0x241E1C // COLORREF = 0x00BBGGRR
+	barTop    = 0x3E3632 // верх панели светлее низа: панель — тоже стекло
+	barFG     = 0xC6BEB8
 	barHot    = 0xFFFFFF
-	trackBG   = 0x362D2B
-	knobBG    = 0xE0E0E0
-	dimFG     = 0x807060
-	appTitle  = "Glasspad"
-	className = "GlasspadWnd"
-	backClass = "GlasspadBackdropWnd"
+	trackBG   = 0x3A302C
+	knobBG    = 0xF0F0F0
+	dimFG     = 0x8C7C70
+	appTitle  = "Glo"
+	className = "GloWnd"
+	backClass = "GloBackdropWnd"
+	glowClass = "GloGlowWnd"
+
+	// Папка данных осталась от прежнего имени: там лежит заметка
+	// пользователя, и переезд ради красивого имени потерял бы её.
+	dataFolder = "Glasspad"
+
+	cfgVersion = 2 // выросла, когда появились сияние и стекло
 )
 
 // Плашка под буквами: включена или нет. Прозрачность к буквам отношения не
@@ -41,17 +49,24 @@ var modeNames = []string{"Без плашки", "Маркер"}
 
 type palette struct {
 	name   string
-	fg     uint32
-	marker uint32
+	fg     uint32 // сами буквы
+	marker uint32 // плашка под буквами, она же цвет стекла
+	glow   uint32 // ореол вокруг букв в режиме сияния
 }
 
+// Ореол всегда насыщеннее самих букв: середина глифа остаётся почти белой,
+// а цвет уходит в свечение по краям — так неон и выглядит.
 var palettes = []palette{
-	{"Белый", 0xFFFFFF, 0x000000},
-	{"Чёрный", 0x000000, 0xFFFFFF},
-	{"Лайм", 0x3CFFB6, 0x00140A},
-	{"Жёлтый", 0x3DD9FF, 0x00141A},
-	{"Циан", 0xFFE76E, 0x1A1300},
-	{"Розовый", 0xD97AFF, 0x14001A},
+	{"Белый", rgb(255, 255, 255), rgb(0, 0, 0), rgb(150, 205, 255)},
+	// У чёрных букв ореол белый: на светлом фоне он работает обводкой,
+	// иначе чёрное на белом сияло бы невидимым чёрным.
+	{"Чёрный", rgb(0, 0, 0), rgb(255, 255, 255), rgb(255, 255, 255)},
+	{"Красный", rgb(255, 95, 95), rgb(24, 0, 0), rgb(255, 30, 40)},
+	{"Зелёный", rgb(105, 255, 150), rgb(0, 22, 8), rgb(20, 255, 110)},
+	{"Синий", rgb(120, 175, 255), rgb(0, 6, 28), rgb(40, 110, 255)},
+	{"Циан", rgb(95, 250, 255), rgb(0, 20, 22), rgb(0, 225, 255)},
+	{"Розовый", rgb(255, 120, 225), rgb(22, 0, 18), rgb(255, 45, 200)},
+	{"Жёлтый", rgb(255, 225, 95), rgb(22, 15, 0), rgb(255, 190, 0)},
 }
 
 const (
@@ -69,6 +84,9 @@ const (
 	cmdTopmost
 	cmdCompact
 	cmdClickThrough
+	cmdGlow
+	cmdBlur
+	cmdDropBelow
 	cmdOpen
 	cmdSave
 	cmdQuit
@@ -101,37 +119,48 @@ const (
 )
 
 const (
-	htLeft        = 10
-	htRight       = 11
-	htTop         = 12
-	htTopLeft     = 13
-	htTopRight    = 14
+	htLeft       = 10
+	htRight      = 11
+	htTop        = 12
+	htTopLeft    = 13
+	htTopRight   = 14
 	htBottom     = 15
 	htBottomLeft = 16
 	idEdit       = 1000
 	timerSave    = 1
 	timerBeat    = 2
+	timerPunch   = 3
+	timerGlow    = 4
+	timerArm     = 5
 )
 
 type config struct {
+	Version  int  `json:"version"`
 	Alpha    int  `json:"alpha"`
 	Mode     int  `json:"mode"`
 	Palette  int  `json:"palette"`
 	FontSize int  `json:"font_size"`
-	Topmost  bool `json:"topmost"`
-	Compact  bool `json:"compact"`
-	Tray     bool `json:"tray"`
-	Taskbar  bool `json:"taskbar"`
-	X        int  `json:"x"`
-	Y        int  `json:"y"`
-	W        int  `json:"w"`
-	H        int  `json:"h"`
+	Glow     bool `json:"glow"`
+	Blur     bool `json:"blur"`
+	// Уводить ли окно под низ после прокола. Выключено: заметка-оверлей
+	// должна оставаться на виду, а прокол и так отдаёт клик вниз.
+	DropBelow bool `json:"drop_below"`
+	Topmost   bool `json:"topmost"`
+	Compact   bool `json:"compact"`
+	Tray      bool `json:"tray"`
+	Taskbar   bool `json:"taskbar"`
+	X         int  `json:"x"`
+	Y         int  `json:"y"`
+	W         int  `json:"w"`
+	H         int  `json:"h"`
 }
 
 func defaultConfig() config {
 	// Прозрачность по умолчанию невысокая: на 80% подложка выглядит просто
 	// чёрным прямоугольником, и непонятно, что окно вообще прозрачное.
-	return config{Alpha: 30, Mode: modeMarker, Palette: 0, FontSize: 16,
+	// Режим по умолчанию — без плашки: она непрозрачна и закрыла бы ореол.
+	return config{Version: cfgVersion, Alpha: 30, Mode: modePlain, Palette: 0,
+		FontSize: 16, Glow: true, Blur: true,
 		Topmost: true, Tray: true, Taskbar: true,
 		X: 120, Y: 120, W: 560, H: 360}
 }
@@ -145,22 +174,34 @@ type barItem struct {
 }
 
 type app struct {
-	hwnd, hEdit, hBack, hInst uintptr
-	cfg                       config
-	dpi                       int32
-	barH                      int32
-	margin                    int32
+	hwnd, hEdit, hBack, hGlow, hInst uintptr
+	cfg                              config
+	dpi                              int32
+	barH                             int32
+	margin                           int32
 
-	editFont, barFont          uintptr
-	bgBrush, barBrush          uintptr
-	backBrush                  uintptr
-	trackBrush, knobBrush      uintptr
-	fontQ                      uint32
-	items                      []barItem
-	sliderRect                 rect
-	draggingSlider             bool
-	clickThrough               bool
-	hidden                     bool
+	editFont, barFont, glowFont uintptr
+	bgBrush, barBrush           uintptr
+	backBrush                   uintptr
+	trackBrush, knobBrush       uintptr
+	knobPen, lineBrush          uintptr
+	fontQ                       uint32
+	items                       []barItem
+	sliderRect                  rect
+	draggingSlider              bool
+	clickThrough                bool
+	punchArmed                  bool // двойной щелчок был, ждём отпускания кнопки
+	dropped                     bool // окно уведено под низ после прокола
+	punching                    bool // идёт разовый прокол по двойному щелчку
+	hidden                      bool
+
+	glow      glowSurface
+	glowShown bool
+	glowDirty bool
+	glowLine  int // первая видимая строка на прошлой отрисовке ореола
+	cornersW  int32
+	cornersH  int32
+
 	beats                      int
 	tray                       notifyIconData
 	savedText                  string
@@ -198,6 +239,8 @@ func main() {
 	a.applyFont()
 	a.applyAlpha(a.cfg.Alpha)
 	a.applyTopmost()
+	a.applyBlur()
+	a.setAppIcon()
 	a.loadNote()
 
 	showWindow(a.hBack, swShowNA)
@@ -205,6 +248,7 @@ func main() {
 	a.syncBackdrop()
 	updateWindow(a.hwnd)
 	setFocus(a.hEdit)
+	a.renderGlow()
 
 	if a.cfg.Tray {
 		a.addTrayIcon()
@@ -215,6 +259,10 @@ func main() {
 	a.registerHotKeys()
 	setTimer(a.hwnd, timerSave, 5000)
 	setTimer(a.hwnd, timerBeat, 1000)
+	// Ореол перерисовывается по таймеру, а не сразу на каждую букву: при
+	// быстром наборе это склеивает десяток перерисовок в одну. Тот же таймер
+	// ловит прокрутку — EDIT о ней не сообщает, когда её делают с клавиатуры.
+	setTimer(a.hwnd, timerGlow, 60)
 	logf("вход в цикл сообщений")
 
 	accels := createAcceleratorTable(accelTable())
@@ -239,7 +287,7 @@ func (a *app) initPaths() {
 			base = "."
 		}
 	}
-	a.dataDir = filepath.Join(base, "Glasspad")
+	a.dataDir = filepath.Join(base, dataFolder)
 	os.MkdirAll(a.dataDir, 0o755)
 	a.notePath = filepath.Join(a.dataDir, "note.txt")
 	a.cfgPath = filepath.Join(a.dataDir, "settings.json")
@@ -252,7 +300,9 @@ func (a *app) initPaths() {
 func (a *app) registerClass() {
 	a.bgBrush = createSolidBrush(colorKey)
 	wc := wndClassEx{
-		Style:         0x0002 | 0x0001, // CS_HREDRAW | CS_VREDRAW
+		// CS_DBLCLKS обязателен: без него окно вообще не получает
+		// WM_LBUTTONDBLCLK, и прокола по двойному щелчку не будет.
+		Style:         0x0002 | 0x0001 | csDblClks, // CS_HREDRAW | CS_VREDRAW
 		LpfnWndProc:   syscall.NewCallback(wndProc),
 		HInstance:     a.hInst,
 		HCursor:       loadCursorArrow(),
@@ -266,6 +316,17 @@ func (a *app) registerClass() {
 	back.LpfnWndProc = syscall.NewCallback(backProc)
 	back.LpszClassName = str16(backClass)
 	registerClass(&back)
+
+	// Окно сияния ничего не обрабатывает: картинку в него кладёт
+	// UpdateLayeredWindow, мышь оно не ловит по стилю.
+	glow := wc
+	glow.LpfnWndProc = syscall.NewCallback(defProc)
+	glow.LpszClassName = str16(glowClass)
+	registerClass(&glow)
+}
+
+func defProc(hwnd, m, wp, lp uintptr) uintptr {
+	return defWindowProc(hwnd, uint32(m), wp, lp)
 }
 
 func (a *app) createWindows() {
@@ -292,14 +353,32 @@ func (a *app) createWindows() {
 	// всё нарисованное поверх остаётся полностью непрозрачным.
 	setLayered(a.hwnd, colorKey, 255, lwaColorKey)
 
+	// Сияние — третье окно, между подложкой и основным. Прозрачность у него
+	// попиксельная (UpdateLayeredWindow), поэтому ореол мягко гаснет к краям
+	// и не выцветает вместе с подложкой. Мышь оно не ловит никогда.
+	a.hGlow = createWindowEx(
+		wsExLayered|wsExTransparent|wsExToolWindow|wsExNoActivate,
+		str16(glowClass), str16(appTitle),
+		wsPopup,
+		int32(a.cfg.X), int32(a.cfg.Y), int32(a.cfg.W), int32(a.cfg.H),
+		0, 0, a.hInst)
+
 	a.hEdit = createWindowEx(0, str16("EDIT"), str16(""),
 		wsChild|wsVisible|esMultiline|esAutoVScrol|esWantReturn|esNoHideSel,
 		0, 0, 10, 10, a.hwnd, uintptr(idEdit), a.hInst)
 	sendMessage(a.hEdit, emSetLimitText, 0, 0)
+	// Поля внутри EDIT обнуляем: ореол рисуется тем же DrawText в те же
+	// координаты, и лишние пиксели слева увели бы его в сторону от букв.
+	sendMessage(a.hEdit, emSetMargins, ecLeftMargin|ecRightMargin, 0)
+	// Двойной щелчок по тексту — это прокол, а не выделение слова, поэтому
+	// сообщение перехватываем до штатной обработки EDIT.
+	editPrevProc = setWindowLong(a.hEdit, gwlWndProc, syscall.NewCallback(editProc))
 
 	a.barBrush = createSolidBrush(barBG)
 	a.trackBrush = createSolidBrush(trackBG)
 	a.knobBrush = createSolidBrush(knobBG)
+	a.knobPen = createPen(knobBG, 1)
+	a.lineBrush = createSolidBrush(shade(barBG, 26))
 	a.barFont = createFont(-a.scale(12), 400, 5, "Segoe UI")
 	a.layoutChildren()
 }
@@ -314,6 +393,24 @@ func (a *app) layoutChildren() {
 		top = 0
 	}
 	moveWindow(a.hEdit, a.margin, top, c.w()-2*a.margin, c.h()-top-a.margin, true)
+	a.glowDirty = true
+}
+
+// editProc перехватывает двойной щелчок по тексту. Всё остальное отдаём
+// штатной процедуре EDIT: каретка, выделение и ввод должны работать как были.
+var editPrevProc uintptr
+
+func editProc(hwnd, m, wp, lp uintptr) uintptr {
+	switch m {
+	case wmLButtonDblClk:
+		a.punchArm()
+		return 0
+	case wmLButtonUp:
+		if a.punchRelease() {
+			return 0
+		}
+	}
+	return callWindowProc(editPrevProc, hwnd, uint32(m), wp, lp)
 }
 
 // ------------------------------------------------------------- вид и режимы
@@ -326,7 +423,28 @@ func (a *app) syncBackdrop() {
 		return
 	}
 	r := getWindowRect(a.hwnd)
-	setWindowPos(a.hBack, a.hwnd, r.Left, r.Top, r.w(), r.h(), swpNoActivate)
+	// Порядок важен: сияние сразу за основным окном, подложка — за сиянием.
+	if a.hGlow != 0 && a.glowShown {
+		setWindowPos(a.hGlow, a.hwnd, r.Left, r.Top, r.w(), r.h(), swpNoActivate)
+		setWindowPos(a.hBack, a.hGlow, r.Left, r.Top, r.w(), r.h(), swpNoActivate)
+	} else {
+		setWindowPos(a.hBack, a.hwnd, r.Left, r.Top, r.w(), r.h(), swpNoActivate)
+	}
+	a.applyCorners(r.w(), r.h())
+}
+
+// applyCorners скругляет оба видимых окна. SetWindowRgn перерисовывает окно
+// целиком, поэтому дёргаем его только когда размер действительно изменился —
+// иначе перетаскивание окна превратилось бы в поток перерисовок.
+func (a *app) applyCorners(w, h int32) {
+	if w == a.cornersW && h == a.cornersH {
+		return
+	}
+	a.cornersW, a.cornersH = w, h
+	rad := a.scale(12)
+	setCorners(a.hwnd, w, h, rad)
+	setCorners(a.hBack, w, h, rad)
+	a.glowDirty = true
 }
 
 func (a *app) applyColors() {
@@ -337,6 +455,14 @@ func (a *app) applyColors() {
 	invalidate(a.hwnd, nil)
 	invalidate(a.hEdit, nil)
 	deleteObject(old)
+	a.glowDirty = true
+}
+
+// applyBlur включает системное размытие за стеклом. Без него подложка просто
+// затемняет то, что под ней; с ним получается настоящая матовая стекляшка.
+func (a *app) applyBlur() {
+	setBlurBehind(a.hBack, a.cfg.Blur)
+	invalidate(a.hBack, nil)
 }
 
 func (a *app) applyAlpha(v int) {
@@ -356,15 +482,16 @@ func (a *app) applyAlpha(v int) {
 }
 
 // У слоёного окна пиксели ключевого цвета не ловят мышь — клик по пустому
-// месту заметки провалился бы в приложение под ней. Пока подложка видна,
-// она эти клики принимает и передаёт фокус в текст; на нуле прозрачности
-// пропускает всё насквозь, как и положено оверлею.
+// месту заметки провалился бы в приложение под ней. Эти клики принимает
+// подложка и передаёт фокус в текст. Раньше она пропускала их насквозь при
+// нулевой прозрачности, и заметка «проваливалась» сама собой; теперь наружу
+// пускают только два явных действия: двойной щелчок и режим сквозного клика.
 func (a *app) updateBackdropHitTest() {
 	if a.hBack == 0 {
 		return
 	}
 	ex := getWindowLong(a.hBack, gwlExStyle)
-	if a.cfg.Alpha == 0 || a.clickThrough {
+	if a.clickThrough || a.punching {
 		ex |= wsExTransparent
 	} else {
 		ex &^= wsExTransparent
@@ -375,6 +502,8 @@ func (a *app) updateBackdropHitTest() {
 // wantFontQuality: когда буквы висят прямо над рабочим столом (нет ни плашки,
 // ни заметной подложки), сглаживание смешивается с ключевым цветом и даёт
 // розовую кайму по краям глифов — тогда его выключаем.
+// Сияние здесь ничего не меняет: ореол живёт на отдельном окне, а сглаженные
+// края глифов смешиваются с фоном своего окна — то есть с ключевым цветом.
 func (a *app) wantFontQuality() uint32 {
 	if a.cfg.Mode == modeMarker || a.cfg.Alpha >= 25 {
 		return 5 // CLEARTYPE_QUALITY
@@ -384,10 +513,22 @@ func (a *app) wantFontQuality() uint32 {
 
 func (a *app) applyFont() {
 	a.fontQ = a.wantFontQuality()
-	old := a.editFont
-	a.editFont = createFont(-(int32(a.cfg.FontSize) * a.dpi / 72), 400, a.fontQ, "Consolas")
+	h := -(int32(a.cfg.FontSize) * a.dpi / 72)
+	// В сиянии буквы жирные: тонкий глиф тонет в собственном ореоле.
+	weight := int32(400)
+	if a.cfg.Glow {
+		weight = 700
+	}
+	old, oldGlow := a.editFont, a.glowFont
+	a.editFont = createFont(h, weight, a.fontQ, "Consolas")
+	// Шрифт ореола обязан совпадать со шрифтом поля по всем метрикам, иначе
+	// свечение уедет от букв. Отличается только сглаживание: маске нужны
+	// серые края, а не цветные субпиксели ClearType.
+	a.glowFont = createFont(h, weight, 4, "Consolas") // ANTIALIASED_QUALITY
 	sendMessage(a.hEdit, wmSetFont, a.editFont, 1)
 	deleteObject(old)
+	deleteObject(oldGlow)
+	a.glowDirty = true
 }
 
 func (a *app) applyTopmost() {
@@ -401,6 +542,12 @@ func (a *app) applyTopmost() {
 
 func (a *app) setMode(m int) {
 	a.cfg.Mode = ((m % len(modeNames)) + len(modeNames)) % len(modeNames)
+	// Плашка непрозрачна и лежит выше сияния: вместе они не работают,
+	// поэтому включение одного гасит другое.
+	if a.cfg.Mode == modeMarker && a.cfg.Glow {
+		a.cfg.Glow = false
+		a.renderGlow()
+	}
 	a.applyFont()
 	invalidate(a.hwnd, nil)
 	invalidate(a.hEdit, nil)
@@ -422,10 +569,10 @@ func (a *app) addTrayIcon() {
 		UID:              1,
 		UFlags:           nifMessage | nifIcon | nifTip,
 		UCallbackMessage: wmTrayIcon,
-		HIcon:            loadAppIcon(),
+		HIcon:            smallIcon(a.hInst),
 	}
 	nid.CbSize = uint32(unsafe.Sizeof(nid))
-	tip := utf16.Encode([]rune("Glasspad — правый клик: меню, двойной: показать/скрыть"))
+	tip := utf16.Encode([]rune("Glo — правый клик: меню, двойной: показать/скрыть"))
 	copy(nid.SzTip[:len(nid.SzTip)-1], tip)
 	a.tray = nid
 	logf("tray add: %v", shellNotifyIcon(nimAdd, &a.tray))
@@ -470,6 +617,18 @@ func (a *app) setTaskbar(on bool) {
 		showWindow(a.hwnd, swShow)
 		a.syncBackdrop()
 		setFocus(a.hEdit)
+	}
+}
+
+// setAppIcon ставит окну свой значок: он виден в панели задач и по Alt+Tab.
+// В самом exe тот же значок лежит ресурсом (см. icon/make_icon.py), поэтому
+// проводник рисует файл им же.
+func (a *app) setAppIcon() {
+	if i := bigIcon(a.hInst); i != 0 {
+		sendMessage(a.hwnd, wmSetIcon, iconBig, i)
+	}
+	if i := smallIcon(a.hInst); i != 0 {
+		sendMessage(a.hwnd, wmSetIcon, iconSmall, i)
 	}
 }
 
@@ -528,9 +687,12 @@ func (a *app) settingsMenu(x, y int32) {
 	appendMenu(m, mfString|mfPopup, sub, "Цвет букв")
 
 	appendMenu(m, mfSeparator, 0, "")
+	menuItem(m, cmdGlow, "Сияние букв\tCtrl+G", a.cfg.Glow)
 	menuItem(m, cmdMode, "Плашка маркера\tCtrl+M", a.cfg.Mode == modeMarker)
+	menuItem(m, cmdBlur, "Матовое стекло", a.cfg.Blur)
 	menuItem(m, cmdTopmost, "Поверх всех окон\tCtrl+T", a.cfg.Topmost)
-	menuItem(m, cmdClickThrough, "Сквозной клик\tCtrl+Alt+E", a.clickThrough)
+	menuItem(m, cmdDropBelow, "Двойной щелчок уводит окно вниз", a.cfg.DropBelow)
+	menuItem(m, cmdClickThrough, "Сквозной клик насовсем\tCtrl+Alt+E", a.clickThrough)
 	menuItem(m, cmdCompact, "Скрыть эту панель\tCtrl+H", a.cfg.Compact)
 
 	appendMenu(m, mfSeparator, 0, "")
@@ -575,12 +737,16 @@ func (a *app) toggleHidden() {
 	if a.hidden {
 		showWindow(a.hwnd, swHide)
 		showWindow(a.hBack, swHide)
+		showWindow(a.hGlow, swHide)
+		a.glowShown = false
 		return
 	}
 	showWindow(a.hBack, swShowNA)
 	showWindow(a.hwnd, swShow)
+	a.raiseBack()
 	a.syncBackdrop()
 	setFocus(a.hEdit)
+	a.renderGlow()
 }
 
 func (a *app) setFontSize(v int) {
@@ -617,19 +783,129 @@ func (a *app) toggleCompact() {
 	a.cfg.Compact = !a.cfg.Compact
 	a.layoutChildren()
 	invalidate(a.hwnd, nil)
+	a.renderGlow()
 }
 
 func (a *app) toggleClickThrough() {
 	a.clickThrough = !a.clickThrough
+	a.setMouseTransparent(a.clickThrough)
+	invalidate(a.hwnd, nil)
+}
+
+// setMouseTransparent снимает или возвращает окну способность ловить мышь.
+// WS_EX_TRANSPARENT у слоёного окна действует сразу, без SetWindowPos.
+func (a *app) setMouseTransparent(on bool) {
 	ex := getWindowLong(a.hwnd, gwlExStyle)
-	if a.clickThrough {
+	if on {
 		ex |= wsExTransparent
 	} else {
 		ex &^= wsExTransparent
 	}
 	setWindowLong(a.hwnd, gwlExStyle, ex)
 	a.updateBackdropHitTest()
+}
+
+// Прокол взводится двойным щелчком, а срабатывает на отпускании кнопки.
+// Раньше это делалось прямо по WM_LBUTTONDBLCLK, но в тот момент кнопка
+// физически ещё нажата, и посланное системе нажатие пришлось бы на уже
+// нажатую кнопку — приложение снизу получило бы вместо клика непонятно что.
+func (a *app) punchArm() {
+	if a.clickThrough || a.punching {
+		return
+	}
+	a.punchArmed = true
+	// Если отпускание уйдёт мимо окна (увели курсор и отпустили снаружи),
+	// взвод не должен висеть до следующего случайного клика.
+	setTimer(a.hwnd, timerArm, 700)
+}
+
+func (a *app) punchRelease() bool {
+	if !a.punchArmed {
+		return false
+	}
+	a.disarmPunch()
+	a.punchThrough()
+	return true
+}
+
+func (a *app) disarmPunch() {
+	a.punchArmed = false
+	killTimer(a.hwnd, timerArm)
+}
+
+// punchThrough — «разовый прокол»: окно на четверть секунды перестаёт ловить
+// мышь и само шлёт системе одиночный клик — он достаётся тому окну, что лежит
+// под заметкой. Постоянный сквозной режим для этого не годится: из него потом
+// надо как-то выбираться, а здесь всё возвращается само.
+func (a *app) punchThrough() {
+	if a.clickThrough || a.punching {
+		return // и так всё летит насквозь
+	}
+	a.punching = true
+	a.setMouseTransparent(true)
+	clickAtCursor()
+	if a.cfg.DropBelow {
+		a.dropBelow()
+	}
+	setTimer(a.hwnd, timerPunch, 250)
+}
+
+// dropBelow уводит заметку под то окно, по которому только что щёлкнули.
+// Признак «поверх всех» в настройках не трогаем: он вернётся, как только
+// пользователь снова возьмётся за заметку.
+func (a *app) dropBelow() {
+	a.dropped = true
+	setWindowPos(a.hwnd, hwndNoTopmost, 0, 0, 0, 0, swpNoMv|swpNoSz|swpNoActivate)
+	a.syncBackdrop()
+}
+
+// raiseBack возвращает заметку наверх. Вызывается на любом обращении к ней:
+// клик по стеклу, клик по панели, разворот из трея.
+func (a *app) raiseBack() {
+	if !a.dropped {
+		return
+	}
+	a.dropped = false
+	a.applyTopmost()
+}
+
+func (a *app) endPunch() {
+	if !a.punching {
+		return
+	}
+	killTimer(a.hwnd, timerPunch)
+	a.punching = false
+	a.setMouseTransparent(a.clickThrough)
+}
+
+func (a *app) toggleGlow() {
+	a.cfg.Glow = !a.cfg.Glow
+	if a.cfg.Glow && a.cfg.Mode == modeMarker {
+		a.cfg.Mode = modePlain // непрозрачная плашка закрыла бы ореол
+	}
+	a.applyFont() // в сиянии буквы жирнее
+	a.renderGlow()
 	invalidate(a.hwnd, nil)
+	invalidate(a.hEdit, nil)
+}
+
+func (a *app) toggleBlur() {
+	a.cfg.Blur = !a.cfg.Blur
+	a.applyBlur()
+}
+
+// glowTick вызывается таймером: перерисовывает ореол, если текст изменился
+// или заметку прокрутили.
+func (a *app) glowTick() {
+	if !a.cfg.Glow || a.hidden {
+		return
+	}
+	line := int(sendMessage(a.hEdit, emGetFirstVisibleLine, 0, 0))
+	if !a.glowDirty && line == a.glowLine {
+		return
+	}
+	a.glowDirty, a.glowLine = false, line
+	a.renderGlow()
 }
 
 // ---------------------------------------------------------------- отрисовка
@@ -657,6 +933,15 @@ func (a *app) buildBar(hdc uintptr, width int32) {
 	add(cmdFontPreset, strconv.Itoa(a.cfg.FontSize), barFG, barBG)
 	add(cmdFontUp, "+", barFG, barBG)
 	add(cmdBW, " Aa ", pal.fg, pal.marker)
+
+	// Сияние крутят часто, поэтому оно на панели: надпись горит цветом
+	// ореола, выключено — тусклая. Значок вместо слова не ставим: в шрифте
+	// панели подходящего глифа может не оказаться, и выйдет пустой квадрат.
+	glowFG := uint32(dimFG)
+	if a.cfg.Glow {
+		glowFG = pal.glow
+	}
+	add(cmdGlow, "Сияние", glowFG, barBG)
 	add(cmdMode, modeNames[a.cfg.Mode], barFG, barBG)
 
 	// «Поверх» и «Сквозной» переехали в настройки: с ними панель не влезала
@@ -691,6 +976,9 @@ func (a *app) paint(hwnd uintptr) {
 
 		bar := rect{0, 0, c.w(), a.barH}
 		fillRect(mem, &bar, a.barBrush)
+		gradientV(mem, bar, barTop, barBG) // панель — тоже стекло, сверху светлее
+		hair := rect{0, a.barH - a.scale(1), c.w(), a.barH}
+		fillRect(mem, &hair, a.lineBrush) // светлая нить по нижнему краю
 		a.buildBar(mem, c.w())
 
 		// ползунок
@@ -700,7 +988,11 @@ func (a *app) paint(hwnd uintptr) {
 		kw := a.scale(10)
 		kx := tr.Left + (tr.w()-kw)*int32(a.cfg.Alpha)/100
 		knob := rect{kx, tr.Top, kx + kw, tr.Bottom}
-		fillRect(mem, &knob, a.knobBrush)
+		oldBr := selectObject(mem, a.knobBrush)
+		oldPn := selectObject(mem, a.knobPen)
+		roundRect(mem, knob, a.scale(3))
+		selectObject(mem, oldPn)
+		selectObject(mem, oldBr)
 
 		setBkMode(mem, transparentBkMode)
 		for _, it := range a.items {
@@ -783,6 +1075,7 @@ func (a *app) hitTest(hwnd uintptr, x, y int32) int32 {
 }
 
 func (a *app) onLButtonDown(x, y int32) {
+	a.raiseBack() // взялись за окно — значит, оно снова нужно наверху
 	if a.cfg.Compact || y >= a.barH {
 		return
 	}
@@ -863,12 +1156,19 @@ func (a *app) command(cmd int32) {
 		}
 	case cmdTopmost:
 		a.cfg.Topmost = !a.cfg.Topmost
+		a.dropped = false
 		a.applyTopmost()
 		invalidate(a.hwnd, nil)
 	case cmdCompact:
 		a.toggleCompact()
 	case cmdClickThrough:
 		a.toggleClickThrough()
+	case cmdGlow:
+		a.toggleGlow()
+	case cmdBlur:
+		a.toggleBlur()
+	case cmdDropBelow:
+		a.cfg.DropBelow = !a.cfg.DropBelow
 	case cmdAlphaUp:
 		a.applyAlpha(a.cfg.Alpha + 5)
 	case cmdAlphaDown:
@@ -921,6 +1221,7 @@ func accelTable() []accel {
 		k(0xBD, cmdFontDown, false),  // VK_OEM_MINUS
 		k(0x6B, cmdFontUp, false),    // VK_ADD
 		k(0x6D, cmdFontDown, false),  // VK_SUBTRACT
+		k('G', cmdGlow, false),
 		k('E', cmdClickThrough, true),
 	}
 }
@@ -963,17 +1264,22 @@ func (a *app) setText(s string) {
 
 // Текст первого запуска: программа приходит одним файлом, без сопроводиловки,
 // поэтому пусть объясняет себя сама. Стирается как обычный текст.
-const welcomeNote = `Glasspad — заметка поверх всех окон.
+const welcomeNote = `Glo — заметка поверх всех окон.
 
 Как закрыть: крестик справа в панельке, Alt+F4,
 или правый клик по значку у часов -> Выход.
 
+Двойной щелчок по заметке = клик по тому, что под ней.
+Обычный клик остаётся заметке, так что окно больше
+не мешает работать с приложением снизу.
+
 Панель сверху:
-  ползунок   прозрачность подложки. Буквы не выцветают никогда
+  ползунок   прозрачность стекла. Буквы не выцветают никогда
   - 16 +     размер шрифта, 8-72. Клик по числу — по размерам
   Aa         белые/чёрные буквы. Правой кнопкой — цвета
+  Сияние     неоновый ореол и жирный контур, Ctrl+G
   Маркер     плашка под буквами, чтобы читалось на любом фоне
-  Настройки  всё остальное: поверх окон, сквозной клик, трей,
+  Настройки  всё остальное: поверх окон, матовое стекло, трей,
              кнопка в панели задач, цвета, файлы, выход
 
 Двигать — за пустое место панели. Размер — за края и углы.
@@ -1048,6 +1354,16 @@ func loadConfig(path string) config {
 	if json.Unmarshal(data, &cfg) != nil {
 		return defaultConfig()
 	}
+	if cfg.Version < cfgVersion {
+		// Настройки от прежней версии: полей сияния и стекла в них нет, а
+		// пропущенное поле в JSON — это false, то есть «выключено». Молча
+		// выключать новое в обновлении неправильно, включаем сами.
+		cfg.Glow, cfg.Blur = true, true
+		if cfg.Mode == modeMarker {
+			cfg.Mode = modePlain // плашка непрозрачна и закрыла бы ореол
+		}
+		cfg.Version = cfgVersion
+	}
 	if cfg.Alpha < 0 || cfg.Alpha > 100 {
 		cfg.Alpha = 80
 	}
@@ -1083,29 +1399,49 @@ func (a *app) saveConfig() {
 
 // ------------------------------------------------------------- оконная процедура
 
-// backProc — окно-подложка. Ничего не умеет, кроме как закрасить себя целиком:
-// вся его роль в том, что LWA_ALPHA применяется к нему, а не к тексту.
+// backProc — окно-подложка: та самая стекляшка. LWA_ALPHA применяется к ней,
+// а не к тексту, поэтому буквы не выцветают вместе с фоном.
 func backProc(hwnd, m, wp, lp uintptr) uintptr {
 	switch m {
 	case wmEraseBkgnd:
 		return 1
 
+	case wmLButtonDblClk:
+		// Двойной щелчок по пустому месту заметки — прокол в то, что снизу.
+		a.punchArm()
+		return 0
+
+	case wmLButtonUp:
+		a.punchRelease()
+		return 0
+
 	case wmLButtonDown:
 		// Клик по подложке = клик по заметке: поднимаем окно и уводим фокус
 		// в текст, чтобы можно было сразу печатать.
 		if a.hwnd != 0 {
+			a.raiseBack()
 			setForegroundWindow(a.hwnd)
 			setFocus(a.hEdit)
 		}
 		return 0
 	case wmPaint:
+		// Рисуем через промежуточный холст: слоёв несколько, и без него
+		// градиенты моргали бы друг сквозь друга при каждом обновлении.
 		var ps paintStruct
 		hdc := beginPaint(hwnd, &ps)
 		c := getClientRect(hwnd)
 		r := rect{0, 0, c.w(), c.h()}
+		mem := createCompatibleDC(hdc)
+		bmp := createCompatibleBitmap(hdc, c.w(), c.h())
+		old := selectObject(mem, bmp)
 		if a.backBrush != 0 {
-			fillRect(hdc, &r, a.backBrush)
+			fillRect(mem, &r, a.backBrush) // на случай, если градиента нет
 		}
+		a.paintGlass(mem, c)
+		bitBlt(hdc, 0, 0, c.w(), c.h(), mem, 0, 0, srcCopy)
+		selectObject(mem, old)
+		deleteObject(bmp)
+		deleteDC(mem)
 		endPaint(hwnd, &ps)
 		return 0
 	}
@@ -1146,6 +1482,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmSize:
 		a.layoutChildren()
 		invalidate(hwnd, nil)
+		a.renderGlow()
 		return 0
 
 	case wmWindowPosChgd:
@@ -1177,6 +1514,13 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		a.onLButtonDown(loWord(lp), hiWord(lp))
 		return 0
 
+	case wmLButtonDblClk:
+		// На панели двойной щелчок ничего не прокалывает: там кнопки.
+		if a.cfg.Compact || hiWord(lp) >= a.barH {
+			a.punchArm()
+		}
+		return 0
+
 	case wmMouseMove:
 		if a.draggingSlider {
 			a.alphaFromX(loWord(lp))
@@ -1187,7 +1531,9 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		if a.draggingSlider {
 			a.draggingSlider = false
 			releaseCapture()
+			return 0
 		}
+		a.punchRelease()
 		return 0
 
 	case wmRButtonUp:
@@ -1195,6 +1541,14 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		return 0
 
 	case wmCommand:
+		if loWord(wp) == idEdit {
+			// Текст изменили или прокрутили — ореол пора перерисовать.
+			switch hiWord(wp) {
+			case enChange, enVScroll:
+				a.glowDirty = true
+			}
+			return 0
+		}
 		a.command(int32(loWord(wp)))
 		return 0
 
@@ -1224,6 +1578,12 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		switch wp {
 		case timerSave:
 			a.saveNote()
+		case timerPunch:
+			a.endPunch()
+		case timerArm:
+			a.disarmPunch()
+		case timerGlow:
+			a.glowTick()
 		case timerBeat:
 			// Пульс: пока эти строки идут, цикл сообщений жив. Если журнал
 			// обрывается на «IN #N» без «OUT #N» — встали на том сообщении.
@@ -1248,6 +1608,11 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		a.saveConfig()
 		a.removeTrayIcon()
 		a.unregisterHotKeys()
+		if a.hGlow != 0 {
+			destroyWindow(a.hGlow)
+			a.hGlow = 0
+		}
+		a.glow.free()
 		if a.hBack != 0 {
 			destroyWindow(a.hBack)
 			a.hBack = 0
