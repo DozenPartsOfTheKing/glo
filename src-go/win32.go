@@ -134,6 +134,7 @@ const (
 	wmWindowPosChgd = 0x0047
 	wmNCCalcSize    = 0x0083
 	wmNCHitTest     = 0x0084
+	wmNCActivate    = 0x0086
 	wmNCLButtonDown = 0x00A1
 	wmLButtonDown   = 0x0201
 	wmLButtonUp     = 0x0202
