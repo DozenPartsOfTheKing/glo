@@ -1,6 +1,6 @@
 //go:build windows
 
-// Тонкая обёртка над Win32 API: только то, что реально используется.
+// A thin wrapper over the Win32 API: only what's actually used.
 package main
 
 import (
@@ -10,9 +10,9 @@ import (
 	"unsafe"
 )
 
-// Всюду, где Go-указатель уходит в Win32 как uintptr, после вызова стоит
-// runtime.KeepAlive: иначе сборщик мусора вправе освободить буфер прямо
-// во время вызова — указателя-то на него уже нет, только число.
+// Wherever a Go pointer goes into Win32 as a uintptr, runtime.KeepAlive
+// follows the call: otherwise the garbage collector is free to release the
+// buffer during the call itself — there's no pointer to it anymore, just a number.
 
 var (
 	user32   = syscall.NewLazyDLL("user32.dll")
@@ -86,7 +86,7 @@ var (
 	pGetSaveFileName = comdlg32.NewProc("GetSaveFileNameW")
 )
 
-// ---------------------------------------------------------------- константы
+// ---------------------------------------------------------------- constants
 
 const (
 	wsPopup      = 0x80000000
@@ -146,7 +146,7 @@ const (
 
 	swHide        = 0
 	swShow        = 5
-	swShowNA      = 8 // показать, не забирая фокус
+	swShowNA      = 8 // show without taking focus
 	swpNoZ        = 0x0004
 	swpFrm        = 0x0020
 	swpNoMv       = 0x0002
@@ -205,7 +205,7 @@ const (
 	ofnExplorer       = 0x00080000
 )
 
-// ------------------------------------------------------------------ структуры
+// ------------------------------------------------------------------ structures
 
 type point struct{ X, Y int32 }
 
@@ -267,8 +267,8 @@ type minMaxInfo struct {
 	PtMaxTrackSize point
 }
 
-// notifyIconData — NOTIFYICONDATAW для amd64, размер 976 байт. Поля-заполнители
-// повторяют выравнивание указателей в оригинальной структуре.
+// notifyIconData — NOTIFYICONDATAW for amd64, 976 bytes. The padding fields
+// mirror the pointer alignment of the original structure.
 type notifyIconData struct {
 	CbSize           uint32
 	_                uint32
@@ -289,8 +289,8 @@ type notifyIconData struct {
 	HBalloonIcon     uintptr
 }
 
-// openFileName — раскладка OPENFILENAMEW для amd64 (явные поля-заполнители
-// рассчитаны на 8-байтное выравнивание указателей). Собирать только под 64 бита.
+// openFileName — layout of OPENFILENAMEW for amd64 (explicit padding fields
+// account for 8-byte pointer alignment). Build for 64-bit only.
 type openFileName struct {
 	LStructSize       uint32
 	_                 uint32
@@ -320,7 +320,7 @@ type openFileName struct {
 	FlagsEx           uint32
 }
 
-// -------------------------------------------------------------------- хелперы
+// -------------------------------------------------------------------- helpers
 
 func rgb(r, g, b uint32) uint32 { return r | g<<8 | b<<16 }
 
@@ -335,15 +335,15 @@ func str16(s string) *uint16 {
 	return p
 }
 
-// utf16z кодирует строку, в которой сами по себе есть \x00 (фильтры диалогов),
-// и добавляет завершающий ноль.
+// utf16z encodes a string that may itself contain \x00 bytes (dialog filters)
+// and appends a terminating zero.
 func utf16z(s string) *uint16 {
 	u := utf16.Encode([]rune(s))
 	u = append(u, 0)
 	return &u[0]
 }
 
-// ------------------------------------------------------------------- функции
+// ------------------------------------------------------------------- functions
 
 func getModuleHandle() uintptr {
 	h, _, _ := pGetModuleHandle.Call(0)
@@ -395,8 +395,8 @@ func getWindowLong(h uintptr, idx int32) uintptr {
 	return r
 }
 
-// Возвращает прежнее значение — на нём держится подмена оконной процедуры
-// поля ввода.
+// Returns the previous value — the edit-field window procedure subclassing
+// relies on it.
 func setWindowLong(h uintptr, idx int32, v uintptr) uintptr {
 	r, _, _ := pSetWindowLongPtr.Call(h, uintptr(idx), v)
 	return r
@@ -437,8 +437,8 @@ func postMessage(h uintptr, m uint32, wp, lp uintptr) {
 	pPostMessage.Call(h, uintptr(m), wp, lp)
 }
 
-// Значок берётся из ресурса самого exe (id 1, собирается icon/make_icon.py).
-// Если ресурса почему-то нет — системный, чтобы в трее не было пустоты.
+// The icon is taken from the exe's own resource (id 1, built by icon/make_icon.py).
+// If the resource is missing for some reason, fall back to the system icon, so the tray isn't left empty.
 func loadAppIcon(inst uintptr, cx, cy int32) uintptr {
 	if i := loadIconRes(inst, 1, cx, cy); i != 0 {
 		return i
@@ -505,9 +505,10 @@ func textWidth(hdc uintptr, text string) int32 {
 	return sz.CX
 }
 
-// bErase=TRUE: иначе смена шрифта, размера или палитры оставляет под новым
-// текстом старый — область помечается грязной, но фон под ней не стирается.
-// Главному окну и подложке это ничего не стоит, они гасят WM_ERASEBKGND.
+// bErase=TRUE: otherwise a font, size, or palette change leaves the old text
+// under the new one — the area is marked dirty, but the background under it
+// isn't erased. This costs nothing for the main window and the backdrop,
+// since they suppress WM_ERASEBKGND.
 func invalidate(h uintptr, r *rect) {
 	var p uintptr
 	if r != nil {
@@ -623,12 +624,12 @@ func getDeviceCaps(hdc uintptr, index int32) int32 {
 	return int32(r)
 }
 
-// fileDialog показывает системный диалог. save=true — «сохранить как».
+// fileDialog shows the system dialog. save=true — "save as".
 func fileDialog(owner uintptr, save bool, defExt string) string {
 	buf := make([]uint16, 1024)
 	ofn := openFileName{
 		HwndOwner:   owner,
-		LpstrFilter: utf16z("Текстовые файлы (*.txt)\x00*.txt\x00Все файлы (*.*)\x00*.*\x00"),
+		LpstrFilter: utf16z(txtFileFilter),
 		LpstrFile:   &buf[0],
 		NMaxFile:    uint32(len(buf)),
 		LpstrDefExt: str16(defExt),

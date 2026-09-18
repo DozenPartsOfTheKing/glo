@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Иконка Glo: рисует плашку, собирает glo.ico и ресурс src-go/icon.syso.
+"""Glo icon: draws the tile, builds glo.ico and the src-go/icon.syso resource.
 
-Запускать при изменении рисунка:  python3 icon/make_icon.py
-Нужен Pillow. Результат (glo.ico, icon.syso, glo.png) лежит в репозитории,
-так что для обычной сборки exe этот скрипт не нужен.
+Run whenever the artwork changes:  python3 icon/make_icon.py
+Needs Pillow. The result (glo.ico, icon.syso, glo.png) lives in the repo,
+so this script isn't needed for a regular exe build.
 """
 import math, os, struct, io
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -11,14 +11,14 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-# ----------------------------------------------------------------- рисование
+# ----------------------------------------------------------------- drawing
 
-CORE = (236, 250, 255)   # ядро букв — почти белое
-NEON = (120, 205, 255)   # ореол и подчёркивание
+CORE = (236, 250, 255)   # letter core — nearly white
+NEON = (120, 205, 255)   # glow and underline
 FONT = "/System/Library/Fonts/Avenir Next.ttc"
 
 def squircle(size, n=4.2, inset=0.0):
-    """Суперэллипс |x|^n+|y|^n=1 — форма плашки, углы круглее обычного скругления."""
+    """Superellipse |x|^n+|y|^n=1 — the tile's shape, corners rounder than a plain rounded rect."""
     m = Image.new("L", (size, size), 0)
     px = m.load()
     r, a = size / 2, size / 2 - inset
@@ -32,7 +32,7 @@ def squircle(size, n=4.2, inset=0.0):
         fx = t ** (1 / n)
         x0, x1 = r - fx * a, r + fx * a
         for x in range(max(0, int(math.floor(x0))), min(size, int(math.ceil(x1)))):
-            cov = min(x + 1, x1) - max(x, x0)          # дробное покрытие = сглаживание
+            cov = min(x + 1, x1) - max(x, x0)          # fractional coverage = anti-aliasing
             px[x, y] = max(px[x, y], int(255 * max(0.0, min(1.0, cov))))
     return m
 
@@ -45,21 +45,21 @@ def vgrad(size, top, bot):
     return g.resize((size, size), Image.BILINEAR)
 
 def tile(size, simple):
-    """Чёрное глянцевое стекло. simple=True — версия для 16-32 px: без
-    мелких деталей, которые на таком размере превращаются в грязь."""
+    """Black glossy glass. simple=True — version for 16-32 px: without
+    fine details that turn into mud at that size."""
     outer = squircle(size)
     inner = squircle(size, inset=size * (0.030 if simple else 0.052))
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    img.paste(vgrad(size, (46, 48, 53), (12, 13, 15)), (0, 0), outer)   # корпус
-    img.paste(vgrad(size, (26, 28, 32), (5, 5, 7)), (0, 0), inner)      # линза
+    img.paste(vgrad(size, (46, 48, 53), (12, 13, 15)), (0, 0), outer)   # body
+    img.paste(vgrad(size, (26, 28, 32), (5, 5, 7)), (0, 0), inner)      # lens
 
-    sheen = Image.new("L", (size, size), 0)                              # глянец сверху
+    sheen = Image.new("L", (size, size), 0)                              # gloss on top
     ImageDraw.Draw(sheen).ellipse([-size*0.30, -size*0.55, size*1.30, size*0.30], fill=95)
     sheen = Image.composite(sheen.filter(ImageFilter.GaussianBlur(size*0.05)),
                             Image.new("L", (size, size), 0), inner)
     img.paste(Image.new("RGB", (size, size), (226, 236, 255)), (0, 0), sheen)
 
-    if not simple:                                                       # отблеск окна
+    if not simple:                                                       # window reflection
         sp = Image.new("L", (size, size), 0)
         ImageDraw.Draw(sp).rounded_rectangle(
             [size*0.165, size*0.30, size*0.285, size*0.365], radius=size*0.018, fill=105)
@@ -67,14 +67,14 @@ def tile(size, simple):
                              Image.new("L", (size, size), 0), inner)
         img.paste(Image.new("RGB", (size, size), (255, 255, 255)), (0, 0), sp)
 
-    ring = Image.composite(Image.new("L", (size, size), 255),             # ободок
+    ring = Image.composite(Image.new("L", (size, size), 255),             # rim
                            Image.new("L", (size, size), 0), outer)
     ring = Image.composite(Image.new("L", (size, size), 0), ring,
                            squircle(size, inset=max(1.2, size*(0.010 if simple else 0.014))))
     img.paste(vgrad(size, (215, 222, 235), (52, 54, 60)), (0, 0),
               ring.filter(ImageFilter.GaussianBlur(size*0.003)))
 
-    if not simple:                                                        # канавка у линзы
+    if not simple:                                                        # groove around the lens
         gr = Image.composite(Image.new("L", (size, size), 120),
                              Image.new("L", (size, size), 0), inner)
         gr = Image.composite(Image.new("L", (size, size), 0), gr,
@@ -110,15 +110,15 @@ def render(size, simple=False):
     img, outer = tile(size, simple)
     marks = [(letter(size, "G", 0.56 if simple else 0.50, -0.055), CORE),
              (bar(size, 0.76 if simple else 0.745, 0.34, 0.052), NEON)]
-    for m, _ in marks:                                   # широкий мягкий ореол
+    for m, _ in marks:                                   # wide soft halo
         img.alpha_composite(glow(m, NEON, size*0.055, 1.0))
-    for m, c in marks:                                   # тугой яркий контур
+    for m, c in marks:                                   # tight bright outline
         img.alpha_composite(glow(m, c, size*0.018, 1.9))
-    for m, c in marks:                                   # само ядро
+    for m, c in marks:                                   # the core itself
         core = Image.new("RGBA", (size, size), c + (0,))
         core.putalpha(m)
         img.alpha_composite(core)
-    a = img.getchannel("A")                              # ничего за пределы плашки
+    a = img.getchannel("A")                              # nothing beyond the tile
     img.putalpha(Image.composite(a, Image.new("L", (size, size), 0), outer))
     return img
 
@@ -136,7 +136,7 @@ def ico_images():
     return out
 
 def bmp_entry(im):
-    """Классическая запись .ico: BITMAPINFOHEADER + BGRA снизу вверх + маска AND."""
+    """Classic .ico entry: BITMAPINFOHEADER + bottom-up BGRA + AND mask."""
     w, h = im.size
     px = im.load()
     hdr = struct.pack("<IiiHHIIiiII", 40, w, h * 2, 1, 32, 0, w * h * 4, 0, 0, 0, 0)
@@ -145,7 +145,7 @@ def bmp_entry(im):
         for x in range(w):
             r, g, b, a = px[x, y]
             xor += bytes((b, g, r, a))
-    stride = ((w + 31) // 32) * 4                 # 1 бит на пиксель, строка кратна 4
+    stride = ((w + 31) // 32) * 4                 # 1 bit per pixel, row padded to a multiple of 4
     mask = bytearray()
     for y in range(h - 1, -1, -1):
         row = bytearray(stride)
@@ -172,10 +172,11 @@ def build_ico(images):
     return head + dirs + b"".join(d for _, d in blobs), blobs
 
 # -------------------------------------------------------------------- .syso
-# COFF-объект с единственной секцией .rsrc: дерево ресурсов (тип -> id -> язык),
-# записи данных и сами картинки. Поле OffsetToData каждой записи данных должно
-# стать RVA, поэтому на него ставится релокация ADDR32NB на символ секции:
-# линковщик Go подставит адрес секции, а лежащее в поле смещение сложит с ним.
+# COFF object with a single .rsrc section: a resource tree (type -> id -> lang),
+# data entries, and the images themselves. Each data entry's OffsetToData field
+# must become an RVA, so an ADDR32NB relocation to the section symbol is placed
+# on it: the Go linker substitutes the section's address and adds the offset
+# stored in the field to it.
 
 RT_ICON, RT_GROUP_ICON, LANG = 3, 14, 1033
 
@@ -222,13 +223,13 @@ def build_syso(blobs):
     buf += rdir(0, 1)                                   # RT_GROUP_ICON: id 1
     buf += struct.pack("<II", 1, 0x80000000 | (off_langs + lang_sz * n))
 
-    for i in range(len(res)):                           # уровень языка
+    for i in range(len(res)):                           # language level
         buf += rdir(0, 1)
         buf += struct.pack("<II", LANG, off_entries + 16 * i)
 
     relocs = []
     for i, (_, _, data) in enumerate(res):
-        relocs.append(len(buf))                         # поле OffsetToData
+        relocs.append(len(buf))                         # the OffsetToData field
         buf += struct.pack("<IIII", data_off[i], len(data), 0, 0)
     buf += b"\x00" * (off_data - len(buf))
     buf += blob_area
@@ -244,10 +245,10 @@ def build_syso(blobs):
                                          ptr_rel, 0, len(relocs), 0, 0x40000040)
     out += section
     for r in relocs:
-        out += struct.pack("<IIH", r, 0, 3)             # символ 0, IMAGE_REL_AMD64_ADDR32NB
-    out += b".rsrc\0\0\0" + struct.pack("<IhHBB", 0, 1, 0, 3, 1)   # символ секции + aux
+        out += struct.pack("<IIH", r, 0, 3)             # symbol 0, IMAGE_REL_AMD64_ADDR32NB
+    out += b".rsrc\0\0\0" + struct.pack("<IhHBB", 0, 1, 0, 3, 1)   # section symbol + aux
     out += struct.pack("<IHHIHBBBB", len(section), len(relocs), 0, 0, 0, 0, 0, 0, 0)
-    out += struct.pack("<I", 4)                          # пустая таблица строк
+    out += struct.pack("<I", 4)                          # empty string table
     return bytes(out)
 
 # --------------------------------------------------------------------- main
@@ -258,4 +259,4 @@ if __name__ == "__main__":
     open(os.path.join(HERE, "glo.ico"), "wb").write(ico)
     open(os.path.join(ROOT, "src-go", "icon.syso"), "wb").write(build_syso(blobs))
     render(512, simple=False).save(os.path.join(HERE, "glo.png"))
-    print("glo.ico: %d байт, %d размеров" % (len(ico), len(blobs)))
+    print("glo.ico: %d bytes, %d sizes" % (len(ico), len(blobs)))

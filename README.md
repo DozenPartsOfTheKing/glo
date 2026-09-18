@@ -1,236 +1,106 @@
 # Glo
 
-Светящаяся заметка-оверлей для Windows: окно поверх всех окон, стеклянная
-подложка с прозрачностью 0–100% при всегда непрозрачных буквах, неоновый ореол
-вокруг текста, плашка-маркер, восемь цветов, шрифт 8–72. Двойной щелчок по
-заметке отдаёт клик тому окну, что лежит под ней.
+**A glowing sticky note that floats above every window on Windows.**
+Transparent glass, fully opaque text, neon glow, and double-click to click *through* the note.
 
-Инструкция для пользователя — в `ИНСТРУКЦИЯ.txt` (обычный текст, можно просто
-переслать). Здесь — техническая часть.
+<!-- Demo GIF goes here: docs/demo.gif (glass slider → glow → double-click through to the app below) -->
 
-## Что где лежит
+[Русская версия](README.ru.md)
 
-| | |
+## Why
+
+Most "always on top" notes fade the whole window when you make it transparent,
+so the text fades with it. Glo keeps them separate:
+
+- **Transparent glass, solid text.** Slide the glass from 0 to 100% — the letters stay crisp at every step.
+  At 0% only the text floats over your screen.
+- **Neon glow.** A soft halo and a bold outline around each letter, readable on any background.
+  Eight colors: white, black, red, green, blue, cyan, pink, yellow.
+- **Click through the note.** A single click edits the note. A double-click passes the click
+  to whatever is underneath — a button, a video, a game. The note stays on top.
+- **Frosted glass** blur behind the note (Windows 10/11).
+- **Marker mode** — a solid highlight under the text for busy backgrounds.
+- **One portable exe, ~2.5 MB.** No installer, no runtime, no dependencies, no network access.
+  Pure Go + Win32.
+- Autosaves every 5 seconds.
+- **5 languages:** English, Русский, Español, 中文, Français — picked from your Windows display language.
+
+## Install
+
+1. Download `Glo.exe` from [Releases](../../releases).
+2. Run it. That's it.
+
+Windows may show **"Windows protected your PC"** on first launch. The exe is not code-signed
+(a certificate costs money), not because anything is wrong with it.
+Click **More info → Run anyway**. You can also build it from source yourself (see below).
+
+Requires 64-bit Windows 10 or 11.
+
+## Usage
+
+| Control | What it does |
 |---|---|
-| `Glo.exe` | сборка для 64-битной Windows, зависимостей нет |
-| `src-go/` | исходники: Go + чистый Win32 через `syscall`, без сторонних пакетов |
-| `src-go/glass.go` | стекло и сияние: рисование ореола, градиенты, размытие |
-| `src-go/menu.go` | своё меню: слоёное окно со стеклом вместо системного `TrackPopupMenu` |
-| `src-go/icon.syso` | значок, вшитый в exe ресурсом (сгенерирован, не правится руками) |
-| `src-go/build.sh` | пересборка exe |
-| `icon/make_icon.py` | рисует значок и собирает `glo.ico` + `icon.syso` |
-| `glasspad.py` | старая версия на Python/tkinter: прозрачность общая на всё окно, без сияния и стекла |
-| `Glasspad (Python).bat` | запуск питоновской версии без окна консоли |
+| Slider | Glass opacity, 0–100%. Text never fades |
+| `- 16 +` | Font size, 8–72. Click the number for presets |
+| `Aa` | Left-click: white ↔ black text. Right-click: cycle colors |
+| Glow | Neon halo on/off |
+| Marker | Solid background under the text |
+| Settings | Everything else: always on top, frosted glass, tray icon, taskbar button, files |
 
-Обе версии читают и пишут одни и те же файлы в `%AppData%\Glasspad\`:
-`note.txt` (автосохранение раз в 5 секунд и при выходе) и `settings.json`.
-Папка сохранила старое имя намеренно: там лежит заметка пользователя, и
-переезд ради нового названия потерял бы её.
+Move the window by an empty spot of the toolbar. Resize by edges and corners.
 
-## Пересборка
+### Shortcuts
 
-```
+| Keys | Action |
+|---|---|
+| Double-click | Click through the note to the window below |
+| `Ctrl+G` | Toggle glow |
+| `Ctrl+M` | Toggle marker |
+| `Ctrl+P` | Next text color |
+| `Ctrl+↑` / `Ctrl+↓` | Glass opacity up / down (`Ctrl+Alt+↑/↓` works globally) |
+| `Ctrl+=` / `Ctrl+-` | Font size up / down |
+| `Ctrl+T` | Always on top |
+| `Ctrl+H` | Hide the toolbar |
+| `Ctrl+Alt+H` | Hide / show the whole window (global) |
+| `Ctrl+Alt+E` | Permanent click-through on/off (global) |
+| `Ctrl+O` / `Ctrl+S` | Open / save as `.txt` |
+| `Ctrl+Q`, `Alt+F4` | Exit |
+
+In permanent click-through mode the note ignores the mouse entirely.
+Turn it off with `Ctrl+Alt+E` or from the tray icon menu.
+
+The note and settings live in `%AppData%\Glasspad\` (`note.txt`, `settings.json`).
+
+To force a UI language, set the environment variable `GLO_LANG` to `en`, `ru`, `es`, `zh` or `fr`.
+All UI strings live in `src-go/i18n.go` — translations and new languages are welcome.
+
+## Build
+
+Cross-compiles from any OS with Go 1.21+, no Windows needed:
+
+```sh
 sh src-go/build.sh
-```
-
-Кросс-компиляция работает с любой ОС, где есть Go, — Windows для сборки не нужна:
-
-```
+# or
 GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui -s -w" -o Glo.exe ./src-go
 ```
 
-Только amd64: раскладка `OPENFILENAMEW` в `win32.go` и `INPUT` в `glass.go`
-рассчитаны на 64-битное выравнивание, под GOARCH=386 сломаются файловые диалоги
-и сквозной клик.
+amd64 only: the `OPENFILENAMEW` and `INPUT` struct layouts assume 64-bit alignment.
 
-## Три окна
+## How it works
 
-`SetLayeredWindowAttributes` умеет либо равномерную альфу на всё окно, либо
-ключевой цвет — то есть «полупрозрачный фон при непрозрачных буквах» одним окном
-не собрать: `LWA_ALPHA` гасит и текст тоже. Поэтому окон три, они лежат друг за
-другом и синхронно двигаются:
+`SetLayeredWindowAttributes` can either fade a whole window (`LWA_ALPHA`) or cut out one
+key color (`LWA_COLORKEY`) — never "transparent background, opaque text" in one window.
+So Glo is three windows stacked and moved together:
 
-1. **подложка** (`GloBackdropWnd`) — стекло. Сплошная заливка градиентами,
-   `LWA_ALPHA` = ползунок. `WS_EX_NOACTIVATE`, фокус не забирает;
-2. **сияние** (`GloGlowWnd`) — ореол вокруг букв. `UpdateLayeredWindow`,
-   попиксельная альфа. `WS_EX_TRANSPARENT`, мышь не ловит никогда;
-3. **основное окно** — `LWA_COLORKEY` с цветом `#FF00FE` и **без** `LWA_ALPHA`.
-   Фон проваливается насквозь, всё нарисованное поверх непрозрачно при любом
-   ползунке.
+1. **Backdrop** — the glass. Gradients with `LWA_ALPHA` driven by the slider.
+2. **Glow** — per-pixel alpha via `UpdateLayeredWindow`. The text is rendered to a DIB,
+   turned into a mask and blurred at two radii (tight outline + wide halo). Never takes the mouse.
+3. **Main window** — a plain `EDIT` control on a `LWA_COLORKEY` background, so the text itself
+   is always fully opaque.
 
-`syncBackdrop` по `WM_WINDOWPOSCHANGED` держит стопку ровно друг под другом:
-`SetWindowPos(hGlow, hwnd, …)`, затем `SetWindowPos(hBack, hGlow, …)`. Вставка
-за окном заодно синхронизирует признак «поверх всех» — размещение за
-не-topmost окном снимает topmost автоматически.
+Double-click-through briefly sets `WS_EX_TRANSPARENT` and replays the click with `SendInput`.
+Full technical notes (in Russian) are in [README.ru.md](README.ru.md).
 
-Поле ввода — обычный `EDIT`. В `WM_CTLCOLOREDIT` ему отдаётся кисть ключевого
-цвета, `SetBkColor` (ключевой цвет, а в режиме маркера — цвет плашки) и
-**всегда** непрозрачный `SetBkMode`: контрол сам рисует плашку под глифами.
-Прозрачный `SetBkMode` здесь ставить нельзя, хотя вне маркера и кажется, что фон
-рисовать незачем: `EDIT` перерисовывает изменённую строку одним `TextOut` и
-рассчитывает, что тот сам затрёт старые пиксели фоновым цветом. Без затирания
-стёртая буква остаётся на экране, а новая ложится поверх неё.
+## License
 
-`InvalidateRect` везде вызывается с `bErase = TRUE` — по той же причине: смена
-шрифта, размера или палитры иначе оставляет под новым текстом старый.
-
-Сглаживание шрифта переключается автоматически (`wantFontQuality`): без плашки и
-при подложке тусклее 25% буквы ложатся почти на голый ключевой цвет, сглаженные
-края смешиваются с ним и дают розовую кайму — там ставится
-`NONANTIALIASED_QUALITY`. Сияние на это не влияет: ореол живёт на своём окне, а
-края глифов смешиваются с фоном своего.
-
-## Сияние
-
-Ключевой цвет умеет только «пиксель есть / пикселя нет», мягкому ореолу этого
-мало, а `LWA_ALPHA` погасил бы свечение вместе с подложкой. Поэтому сияние —
-отдельное окно с попиксельной альфой:
-
-1. текст рисуется белым по чёрному в 32-битный DIB (`CreateDIBSection`) тем же
-   шрифтом и в тот же прямоугольник, что и `EDIT` — с `DT_EDITCONTROL |
-   DT_WORDBREAK`, начиная с `EM_GETFIRSTVISIBLELINE`, при обнулённых
-   `EM_SETMARGINS`. Совпадение раскладки поэтому не идеальное, но ореол
-   размытый — расхождение в пиксель незаметно;
-2. из яркости получается маска, маска размывается двумя радиусами: тугим
-   (жирный контур) и широким (само свечение);
-3. широкий радиус размывается **дважды**: одно коробочное размытие обрывается
-   ступенькой, и вокруг слов встают квадратные пятна; второй проход превращает
-   ступеньку в плавный спад;
-4. из маски собираются пиксели с предумноженной альфой — этого требует
-   `UpdateLayeredWindow` с `AC_SRC_ALPHA`.
-
-Размывать можно на месте (`boxBlur(halo, halo, …)`): первый проход целиком
-перекладывает картинку во временный буфер, дальше исходный не читается.
-
-Шрифт ореола создаётся отдельно от шрифта поля и обязан совпадать с ним по всем
-метрикам — отличается только качество: маске нужны серые края
-(`ANTIALIASED_QUALITY`), а не цветные субпиксели ClearType.
-
-Перерисовка идёт по таймеру раз в 60 мс, а не на каждое `EN_CHANGE`: при быстром
-наборе это склеивает десяток перерисовок в одну. Тот же таймер ловит прокрутку —
-`EDIT` о ней не сообщает, когда её делают с клавиатуры, поэтому сравнивается
-`EM_GETFIRSTVISIBLELINE`.
-
-Сияние и маркер исключают друг друга: плашка непрозрачна, лежит в основном окне
-и просто закрыла бы ореол. Включение одного гасит другое.
-
-## Стекло
-
-`paintGlass` рисует подложку слоями: основной вертикальный градиент, глянцевая
-полоса в верхних 38%, подсветка у нижней кромки и светлый ободок
-`RoundRect`. Границы полос считаются через `mixColor` — если оборвать глянец
-произвольным цветом, на стыке с основным градиентом видна ступенька.
-
-Углы скругляются `SetWindowRgn` (`applyCorners`), и только при изменении
-размера: `SetWindowRgn` перерисовывает окно целиком, на каждом
-`WM_WINDOWPOSCHANGED` это был бы поток перерисовок при перетаскивании.
-
-Размытие фона — `SetWindowCompositionAttribute` с `ACCENT_ENABLE_BLURBEHIND`.
-Функция недокументированная, поэтому берётся через `LazyProc.Find()`: если её
-нет, стекло остаётся просто полупрозрачным, и ничего не ломается. Пункт меню
-«Матовое стекло» её переключает.
-
-## Двойной щелчок сквозь заметку
-
-Пиксели ключевого цвета у слоёного окна не ловят мышь, поэтому клики по пустому
-месту заметки принимает подложка (`WM_LBUTTONDOWN` → `SetForegroundWindow` +
-`SetFocus` на `EDIT`). Раньше она пропускала клики насквозь при нулевой
-прозрачности — заметка «проваливалась» сама собой. Теперь наружу пускают только
-два явных действия: двойной щелчок и режим сквозного клика.
-
-Прокол устроен так: `WM_LBUTTONDBLCLK` только **взводит** его, а срабатывает он
-на `WM_LBUTTONUP`. В момент двойного щелчка кнопка физически ещё нажата, и
-посланное через `SendInput` нажатие пришлось бы на уже нажатую кнопку —
-приложение снизу получило бы вместо клика неизвестно что. На отпускании окно
-получает `WS_EX_TRANSPARENT`, шлёт системе чистую пару вниз-вверх и через 250 мс
-таймером возвращает себе мышь. Взвод тоже с таймером на 700 мс: если отпустить
-кнопку за пределами окна, `WM_LBUTTONUP` не придёт, и взвод не должен висеть до
-следующего случайного клика.
-
-Двойной щелчок по тексту перехватывается подменой оконной процедуры `EDIT`
-(`SetWindowLongPtr` + `CallWindowProc`). Плата — выделение слова двойным
-щелчком; всё остальное поведение поля остаётся штатным.
-
-Классам окон нужен `CS_DBLCLKS`, иначе `WM_LBUTTONDBLCLK` не приходит вовсе.
-
-Необязательный режим «двойной щелчок уводит окно вниз» (`DropBelow`) после
-прокола снимает с окна topmost, и активированное чужое окно оказывается сверху.
-Признак «поверх всех» в настройках при этом не меняется: он возвращается на
-первом же обращении к заметке (`raiseBack`).
-
-## Значок
-
-Значок нарисован скриптом `icon/make_icon.py` (Pillow): чёрная глянцевая плашка
-формы суперэллипса, светящаяся «G» с неоновым подчёркиванием. Для 16–32 px
-рисуется упрощённый вариант — мелкие детали на таком размере превращаются в
-грязь.
-
-Тот же скрипт собирает `src-go/icon.syso` — COFF-объект с единственной секцией
-`.rsrc`: дерево ресурсов (`RT_ICON` 1..7, `RT_GROUP_ICON` 1), записи данных и
-сами картинки. Поле `OffsetToData` каждой записи обязано стать RVA, поэтому на
-него ставится релокация `IMAGE_REL_AMD64_ADDR32NB` на символ секции: линковщик
-Go подставит адрес секции и сложит с лежащим в поле смещением. Готовый `.syso`
-лежит в репозитории, для обычной сборки exe скрипт и Pillow не нужны.
-
-Из ресурса значок берут `LoadImage` (`WM_SETICON` для панели задач и Alt+Tab,
-трей) и проводник — для файла exe.
-
-## Заметки по коду
-
-- `runtime.LockOSThread()` в `init()` — обязателен. Очередь сообщений в Windows
-  принадлежит потоку, создавшему окно, а главная горутина Go после блокирующего
-  вызова спокойно переезжает на другой поток. Тогда окно создано на одном потоке,
-  `GetMessage` крутится на другом, и приложение виснет с «не отвечает» — при том,
-  что первая отрисовка успевает пройти (её делает `UpdateWindow` синхронно).
-- Рамки у окна нет (`WS_POPUP` + `WM_NCCALCSIZE` → клиентская область на всё окно),
-  таскание и растягивание сделаны через свой `WM_NCHITTEST`: пустое место панели —
-  `HTCAPTION`, края — `HTLEFT`/`HTBOTTOMRIGHT` и т.д. `WS_THICKFRAME` оставлен,
-  иначе система не начнёт ресайз.
-- Поле ввода отступает от краёв на 6 px, чтобы полоски для растягивания
-  оставались за родительским окном, а не за дочерним контролом.
-- Оконная процедура принимает все четыре параметра как `uintptr`:
-  `syscall.NewCallback` не умеет аргументы меньше машинного слова.
-- Везде, где Go-указатель уходит в Win32 как `uintptr`, после вызова стоит
-  `runtime.KeepAlive` — иначе сборщик вправе освободить буфер во время вызова.
-- Единственное предупреждение `go vet` — `unsafe.Pointer(lp)` в `WM_GETMINMAXINFO`.
-  Там система сама передаёт указатель числом, так и должно быть.
-- В `settings.json` есть `version`. Настройки от прежних версий не знают полей
-  сияния и стекла, а пропущенное поле в JSON — это `false`, то есть
-  «выключено»; при `version < 2` новое включается принудительно.
-
-## Журнал
-
-Сборка пишет `%AppData%\Glasspad\debug.log`, перезаписывая его на каждом запуске.
-Формат: время от старта, вехи запуска, пары `IN #N 0x****` / `OUT #N 0x****` вокруг
-каждого обработанного сообщения (шумные вроде `WM_MOUSEMOVE` и `WM_NCHITTEST`
-отфильтрованы) и раз в секунду строка «пульс».
-
-Как читать при зависании:
-
-- есть `IN #N`, нет `OUT #N` → встали внутри обработчика этого сообщения;
-- идут «пульс», но окно не реагирует → цикл жив, дело в отрисовке или вводе;
-- журнал обрывается на вехе запуска → не дошли до цикла сообщений.
-
-Запись идёт обычным `WriteFile` без `Sync`: данные уходят в кеш ОС и переживают
-снятие задачи, так что последняя строка — это честное место остановки.
-
-## Статус проверки
-
-Схема с двумя окнами (непрозрачные буквы) проверялась на живой машине и работает.
-Всё, что добавлено в версии Glo — третье окно с сиянием, стекло, скругление
-углов, размытие фона, прокол по двойному щелчку, значок — собрано и проверено
-кросс-компиляцией, разбором ресурсов готового exe и прогоном алгоритма ореола на
-тестовых данных, но **на самой Windows ещё не запускалось**.
-
-Что смотреть при первом запуске:
-
-- ореол стоит ровно вокруг букв и не отстаёт при прокрутке и смене размера
-  шрифта (расхождение выдаст несовпадение раскладки `DrawText` и `EDIT`);
-- ползунок гасит стекло, но не буквы и не ореол;
-- двойной щелчок по заметке нажимает кнопку в окне снизу, одиночный — нет;
-- стопка окон не рассыпается при перетаскивании: сияние строго под основным,
-  стекло под сиянием;
-- «Матовое стекло» действительно размывает фон (на Win10/11) и не мешает
-  перетаскиванию;
-- углы скруглены у стекла и у панели одинаково;
-- значок виден у файла в проводнике, в панели задач и у часов.
+[MIT](LICENSE)

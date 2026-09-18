@@ -1,16 +1,18 @@
 //go:build windows
 
-// Своё выпадающее меню. Системное TrackPopupMenu рисует система: это чужое
-// окно, у которого не отнять ни белого фона, ни рамки, ни непрозрачности —
-// поверх стеклянной заметки оно выглядело чужеродной заплатой. Поэтому меню
-// здесь своё: те же слои, то же стекло и то же размытие, что у самой заметки.
+// A custom dropdown menu. The system's TrackPopupMenu draws a window owned
+// by the system: you can't strip its white background, its border, or its
+// opacity — on top of the glass note it looked like a foreign patch. So the
+// menu here is our own: the same layers, the same glass, the same blur as
+// the note itself.
 //
-// Устройство. Каждое меню — окно с попиксельной прозрачностью
-// (UpdateLayeredWindow): стекло полупрозрачное, буквы поверх него — плотные.
-// Так же сделано сияние, только там маска размывается, а тут ею красятся
-// подписи. Мышь на всё время показа захвачена корневым окном, поэтому все
-// щелчки и движения приходят в одну процедуру, и подменю не нужно ловить
-// события самому — оно только рисуется.
+// Design. Each menu is a window with per-pixel transparency
+// (UpdateLayeredWindow): the glass is translucent, the letters on top of it
+// are solid. The glow is built the same way, except there the mask gets
+// blurred, while here it paints the labels. The mouse is captured by the
+// root window for the whole time the menu is shown, so all clicks and moves
+// arrive at one procedure, and the submenu doesn't need to catch events
+// itself — it only draws.
 package main
 
 import (
@@ -20,7 +22,7 @@ import (
 
 const menuClass = "GloMenuWnd"
 
-// Меню плотнее заметки: сквозь него надо читать подписи, а не обои.
+// The menu is denser than the note: you need to read labels through it, not wallpaper.
 const menuAlpha = 224
 
 const (
@@ -53,9 +55,9 @@ type monitorInfo struct {
 	DwFlags           uint32
 }
 
-// workArea — рабочая область экрана, на котором лежит точка (без панели
-// задач). По одному GetSystemMetrics обошлись бы, но на втором мониторе
-// меню тогда уезжало бы на первый.
+// workArea — the work area of the monitor the point lies on (excluding the
+// taskbar). A single GetSystemMetrics call would suffice, but on a second
+// monitor the menu would then end up on the first one.
 func workArea(p point) rect {
 	mon, _, _ := pMonitorFromPoint.Call(
 		uintptr(uint32(p.X))|uintptr(uint32(p.Y))<<32, monitorNearest)
@@ -71,29 +73,29 @@ func workArea(p point) rect {
 	return rect{0, 0, getSystemMetrics(0), getSystemMetrics(1)}
 }
 
-// ------------------------------------------------------------------ пункты
+// ------------------------------------------------------------------ items
 
-// mItem — один пункт. Пустой label с sep=true даёт разделитель, непустой
-// sub — подменю (тогда cmd не нужен).
+// mItem — a single item. An empty label with sep=true gives a separator, a
+// non-empty sub gives a submenu (then cmd isn't needed).
 type mItem struct {
 	cmd   int32
 	label string
-	accel string // подпись горячей клавиши справа
+	accel string // hotkey label shown on the right
 	check bool
 	sep   bool
 	sub   []mItem
 }
 
-// ------------------------------------------------------------------ холст
+// ------------------------------------------------------------------ canvas
 
-// menuSurface — тот же приём, что у сияния: DIB, в который рисует GDI, и
-// параллельный ему буфер out с настоящей альфой. GDI про альфу не знает и
-// затирает её мусором, поэтому итоговые пиксели собираются вручную.
+// menuSurface — the same trick as the glow: a DIB that GDI draws into, and a
+// parallel buffer out holding real alpha. GDI doesn't know about alpha and
+// scribbles garbage into it, so the final pixels are assembled by hand.
 type menuSurface struct {
 	dc, bmp, oldBmp uintptr
-	px              []uint32 // то, во что рисует GDI
-	out             []uint32 // то, что уйдёт в UpdateLayeredWindow
-	cov             []uint8  // покрытие скруглённого угла, 0..255
+	px              []uint32 // what GDI draws into
+	out             []uint32 // what goes into UpdateLayeredWindow
+	cov             []uint8  // rounded-corner coverage, 0..255
 	w, h            int32
 }
 
@@ -136,10 +138,10 @@ func (s *menuSurface) resize(w, h, radius int32) bool {
 	return true
 }
 
-// roundCoverage — доля пикселя внутри скруглённого прямоугольника. Регионом
-// (SetWindowRgn) углы вышли бы ступеньками: регион знает только «внутри» и
-// «снаружи». Здесь у краевых пикселей своя прозрачность, и срез получается
-// гладким. Считается один раз на размер, дальше только читается.
+// roundCoverage — the fraction of a pixel inside a rounded rectangle. With a
+// region (SetWindowRgn) the corners would come out stepped: a region only
+// knows "inside" and "outside". Here edge pixels get their own opacity, and
+// the cut comes out smooth. Computed once per size, read thereafter.
 func roundCoverage(w, h, r int32) []uint8 {
 	cov := make([]uint8, int(w)*int(h))
 	for i := range cov {
@@ -154,7 +156,7 @@ func roundCoverage(w, h, r int32) []uint8 {
 	if r <= 0 {
 		return cov
 	}
-	const ss = 4 // 4x4 подвыборки на пиксель — глазу этого уже хватает
+	const ss = 4 // 4x4 subsamples per pixel — enough for the eye already
 	cx := [2]int32{r, w - r}
 	cy := [2]int32{r, h - r}
 	x0 := [2]int32{0, w - r}
@@ -182,14 +184,14 @@ func roundCoverage(w, h, r int32) []uint8 {
 	return cov
 }
 
-// dibOf переставляет байты COLORREF (0x00BBGGRR) в порядок пикселя DIB
-// (0x00RRGGBB). Без этого красное на холсте выходит синим.
+// dibOf reorders COLORREF bytes (0x00BBGGRR) into DIB pixel order
+// (0x00RRGGBB). Without this, red on the canvas comes out blue.
 func dibOf(c uint32) uint32 {
 	return uint32(chanOf(c, 0))<<16 | uint32(chanOf(c, 1))<<8 | uint32(chanOf(c, 2))
 }
 
-// premul — пиксель GDI с заданной альфой, уже помноженный на неё:
-// UpdateLayeredWindow принимает только предумноженные цвета.
+// premul — a GDI pixel with a given alpha, already multiplied by it:
+// UpdateLayeredWindow only accepts premultiplied colors.
 func premul(p uint32, al int32) uint32 {
 	r := int32((p>>16)&0xFF) * al / 255
 	g := int32((p>>8)&0xFF) * al / 255
@@ -197,8 +199,8 @@ func premul(p uint32, al int32) uint32 {
 	return uint32(al)<<24 | uint32(r)<<16 | uint32(g)<<8 | uint32(b)
 }
 
-// over кладёт непрозрачный цвет src поверх dst с покрытием cov (0..255).
-// Обе стороны предумножены, поэтому это обычное «источник поверх».
+// over places opaque color src on top of dst with coverage cov (0..255).
+// Both sides are premultiplied, so this is an ordinary "source over".
 func over(dst, src uint32, cov int32) uint32 {
 	if cov <= 0 {
 		return dst
@@ -214,13 +216,13 @@ func over(dst, src uint32, cov int32) uint32 {
 	return uint32(al)<<24 | uint32(r)<<16 | uint32(g)<<8 | uint32(b)
 }
 
-// ------------------------------------------------------------------ окно
+// ------------------------------------------------------------------ window
 
 type menuWin struct {
 	h     uintptr
 	items []mItem
-	rows  []rect // строки в координатах холста
-	hot   int    // подсвеченная строка, -1 — никакой
+	rows  []rect // rows in canvas coordinates
+	hot   int    // highlighted row, -1 — none
 	w, ht int32
 	x, y  int32
 
@@ -238,7 +240,7 @@ func (m *menuWin) free() {
 
 func (m *menuWin) rect() rect { return rect{m.x, m.y, m.x + m.w, m.y + m.ht} }
 
-// at — строка под точкой (экранные координаты) или -1.
+// at — the row under the point (screen coordinates), or -1.
 func (m *menuWin) at(p point) int {
 	if m == nil || !m.rect().has(p.X, p.Y) {
 		return -1
@@ -279,7 +281,7 @@ func (a *app) measureMenu(m *menuWin) {
 		}
 	}
 	if maxA > 0 {
-		maxA += a.scale(30) // зазор между подписью и горячей клавишей
+		maxA += a.scale(30) // gap between the label and the hotkey
 	}
 
 	m.w = padL + checkW + maxL + maxA + arrowW + padR
@@ -306,7 +308,7 @@ func (a *app) measureMenu(m *menuWin) {
 	releaseDC(0, dc)
 }
 
-// ------------------------------------------------------------------ рисование
+// ------------------------------------------------------------------ drawing
 
 func (a *app) renderMenu(m *menuWin) {
 	rad := a.scale(10)
@@ -321,10 +323,11 @@ func (a *app) renderMenu(m *menuWin) {
 		s.out[i] = premul(p, menuAlpha*int32(s.cov[i])/255)
 	}
 
-	// Текст кладётся не поверх GDI-картинки, а отдельными проходами: каждый
-	// рисуется белым по чёрному, и яркость становится покрытием. Иначе
-	// сглаженные края букв смешались бы с фоном ещё до того, как у пикселя
-	// появится альфа, и по контуру глифов пошла бы грязь.
+	// Text isn't placed on top of the GDI image but in separate passes: each
+	// one is drawn white on black, and brightness becomes coverage.
+	// Otherwise the anti-aliased letter edges would blend with the
+	// background before the pixel even had alpha, leaving grime along the
+	// glyph outlines.
 	for grp := 0; grp < 3; grp++ {
 		for i := range s.px {
 			s.px[i] = 0
@@ -351,7 +354,7 @@ func (a *app) renderMenu(m *menuWin) {
 
 func (a *app) paintMenuBack(m *menuWin, s *menuSurface, rad int32) {
 	full := rect{0, 0, s.w, s.h}
-	gradientV(s.dc, full, barTop, barBG) // сверху светлее — как панель заметки
+	gradientV(s.dc, full, barTop, barBG) // lighter at the top — like the note's bar
 
 	if m.hot >= 0 && m.hot < len(m.rows) && !m.items[m.hot].sep {
 		r := m.rows[m.hot]
@@ -388,9 +391,9 @@ func (a *app) paintMenuBack(m *menuWin, s *menuSurface, rad int32) {
 	deleteObject(pen)
 }
 
-// drawMenuText рисует один цветовой слой и говорит, было ли что рисовать:
-// 0 — обычные подписи, 1 — горячие клавиши, 2 — всё яркое (подсвеченная
-// строка, галочки, стрелки подменю).
+// drawMenuText draws a single color layer and reports whether there was
+// anything to draw: 0 — regular labels, 1 — hotkeys, 2 — everything bright
+// (the highlighted row, checkmarks, submenu arrows).
 func (a *app) drawMenuText(m *menuWin, dc uintptr, grp int) bool {
 	drew := false
 	for i, it := range m.items {
@@ -433,7 +436,7 @@ func (a *app) drawMenuText(m *menuWin, dc uintptr, grp int) bool {
 	return drew
 }
 
-// ------------------------------------------------------------------ показ
+// ------------------------------------------------------------------ display
 
 func (a *app) newMenuWin(items []mItem) *menuWin {
 	m := &menuWin{items: items, hot: -1}
@@ -448,8 +451,8 @@ func (a *app) newMenuWin(items []mItem) *menuWin {
 	return m
 }
 
-// showMenuWin ставит окно так, чтобы оно целиком помещалось на экране, и
-// показывает его, не забирая фокус: заметка под меню остаётся активной.
+// showMenuWin positions the window so it fits fully on screen, then shows it
+// without taking focus: the note beneath the menu stays active.
 func (a *app) showMenuWin(m *menuWin, x, y int32) {
 	wa := workArea(point{x, y})
 	if x+m.w > wa.Right {
@@ -465,28 +468,28 @@ func (a *app) showMenuWin(m *menuWin, x, y int32) {
 		y = wa.Top
 	}
 	m.x, m.y = x, y
-	a.renderMenu(m) // UpdateLayeredWindow заодно двигает окно на место
+	a.renderMenu(m) // UpdateLayeredWindow also moves the window into place
 	showWindow(m.h, swShowNA)
 }
 
-// ------------------------------------------------------------------ сеанс
+// ------------------------------------------------------------------ session
 
-// Сеанс показа. Меню модально: пока оно на экране, крутится свой цикл
-// сообщений, а мышь захвачена корневым окном.
+// Display session. The menu is modal: while it's on screen, its own message
+// loop spins, and the mouse is captured by the root window.
 type menuSess struct {
 	root   *menuWin
 	child  *menuWin
-	openAt int // строка root, чьё подменю открыто, -1 — нет
+	openAt int // root row whose submenu is open, -1 — none
 	result int32
 	done   bool
 
-	origin point // где была мышь в момент открытия
-	moved  bool  // курсор с тех пор уходил с этого места
+	origin point // where the mouse was at the moment of opening
+	moved  bool  // whether the cursor has since left that spot
 }
 
 var menuSes *menuSess
 
-// inside — попала ли точка хоть в одно из окон меню.
+// inside — whether the point falls inside any of the menu windows.
 func (s *menuSess) inside(p point) bool {
 	if s.root != nil && s.root.rect().has(p.X, p.Y) {
 		return true
@@ -494,7 +497,7 @@ func (s *menuSess) inside(p point) bool {
 	return s.child != nil && s.child.rect().has(p.X, p.Y)
 }
 
-// trackMenu показывает меню и возвращает выбранную команду (0 — отказ).
+// trackMenu shows the menu and returns the chosen command (0 — cancelled).
 func (a *app) trackMenu(items []mItem, x, y int32) int32 {
 	if menuSes != nil || len(items) == 0 {
 		return 0
@@ -511,11 +514,11 @@ func (a *app) trackMenu(items []mItem, x, y int32) int32 {
 	var m msg
 	for !menuSes.done {
 		if getMessage(&m) <= 0 {
-			postQuitMessage(0) // WM_QUIT надо вернуть главному циклу
+			postQuitMessage(0) // WM_QUIT needs to be returned to the main loop
 			break
 		}
 		if menuKey(&m) {
-			continue // клавиши, пока меню открыто, полю ввода не достаются
+			continue // keys don't reach the edit control while the menu is open
 		}
 		translateMessage(&m)
 		dispatchMessage(&m)
@@ -553,14 +556,14 @@ func (a *app) menuOpenChild(idx int) {
 	x := menuSes.root.x + menuSes.root.w - a.scale(4)
 	wa := workArea(point{x, menuSes.root.y})
 	if x+c.w > wa.Right {
-		x = menuSes.root.x - c.w + a.scale(4) // справа не влезло — раскроем влево
+		x = menuSes.root.x - c.w + a.scale(4) // didn't fit on the right — open left instead
 	}
 	menuSes.child = c
 	menuSes.openAt = idx
 	a.showMenuWin(c, x, menuSes.root.y+row.Top-a.scale(6))
 }
 
-// menuHover ведёт подсветку и подменю по положению курсора.
+// menuHover drives the highlight and submenu based on cursor position.
 func (a *app) menuHover(p point) {
 	s := menuSes
 	if s.child != nil {
@@ -574,8 +577,9 @@ func (a *app) menuHover(p point) {
 	}
 	i := s.root.at(p)
 	if i < 0 {
-		// Курсор мимо всего: подсветку в подменю гасим, само подменю
-		// оставляем — иначе оно захлопывалось бы на пути к нему.
+		// Cursor is off everything: clear the highlight in the submenu, but
+		// leave the submenu itself open — otherwise it would slam shut on
+		// the way to it.
 		if s.child != nil && s.child.hot != -1 {
 			s.child.hot = -1
 			a.renderMenu(s.child)
@@ -613,8 +617,8 @@ func (a *app) menuPick(m *menuWin, idx int) {
 	menuSes.done = true
 }
 
-// menuProc обслуживает оба окна меню, но мышь приходит только в корневое:
-// оно держит захват, поэтому щелчки мимо меню тоже попадают сюда.
+// menuProc serves both menu windows, but the mouse only arrives at the root
+// one: it holds the capture, so clicks outside the menu land here too.
 func menuProc(hwnd, m, wp, lp uintptr) uintptr {
 	if menuSes == nil {
 		return defWindowProc(hwnd, uint32(m), wp, lp)
@@ -633,16 +637,17 @@ func menuProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmLButtonDown:
 		p := getCursorPos()
 		if !menuSes.inside(p) {
-			menuSes.done = true // щелчок мимо — просто закрыть
+			menuSes.done = true // click outside — just close
 		}
 		return 0
 
 	case wmLButtonUp:
-		// Отпускание кнопки, которой меню и открыли, приходит уже сюда —
-		// захват мыши к этому моменту у нас. Пока курсор не сдвинулся с
-		// места открытия, выбором это не считается: иначе меню, вылезшее
-		// из-под курсора (внизу экрана оно раскрывается вверх), тут же
-		// сработало бы первым попавшимся пунктом.
+		// The release of the button that opened the menu arrives here too —
+		// we already hold the mouse capture by this point. As long as the
+		// cursor hasn't moved from where it opened, this doesn't count as a
+		// selection: otherwise a menu that popped up under the cursor
+		// (near the bottom of the screen it opens upward) would immediately
+		// fire whatever item happened to land there.
 		if !menuSes.moved {
 			return 0
 		}
@@ -660,16 +665,17 @@ func menuProc(hwnd, m, wp, lp uintptr) uintptr {
 		return 0
 
 	case wmCaptureChgd:
-		menuSes.done = true // захват увели — держать меню больше не на чем
+		menuSes.done = true // capture was taken away — nothing left to hold the menu open
 		return 0
 	}
 	return defWindowProc(hwnd, uint32(m), wp, lp)
 }
 
-// menuKey разбирает клавиатуру прямо в цикле: окно меню фокуса не берёт,
-// поэтому нажатия адресованы полю ввода и до процедуры меню не дойдут.
-// Всё, что нажато при открытом меню, съедается — иначе стрелки уехали бы
-// каретке, а буквы упали бы в текст заметки.
+// menuKey handles the keyboard right in the loop: the menu window doesn't
+// take focus, so keystrokes are addressed to the edit control and would
+// never reach the menu procedure. Everything pressed while the menu is open
+// gets eaten here — otherwise arrow keys would move the caret, and letters
+// would fall into the note's text.
 func menuKey(m *msg) bool {
 	switch m.Message {
 	case wmChar, wmSysChar, wmKeyUp, wmSysKeyUp:
@@ -712,7 +718,7 @@ func menuKey(m *msg) bool {
 	return true
 }
 
-// menuStep двигает подсветку на следующий выбираемый пункт по кругу.
+// menuStep moves the highlight to the next selectable item, wrapping around.
 func menuStep(m *menuWin, d int) {
 	if m == nil || len(m.items) == 0 {
 		return

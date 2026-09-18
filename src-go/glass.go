@@ -1,7 +1,7 @@
 //go:build windows
 
-// Стекло и сияние: всё, что рисует «жидкое стекло» подложки и неоновый ореол
-// вокруг букв, плюс обёртки Win32, нужные только этой части.
+// Glass and glow: everything that draws the "liquid glass" backdrop and the
+// neon halo around the letters, plus the Win32 wrappers needed only here.
 package main
 
 import (
@@ -27,8 +27,8 @@ var (
 	pKillTimer      = user32.NewProc("KillTimer")
 	pLoadImage      = user32.NewProc("LoadImageW")
 
-	// Размытие за окном — недокументированная, но живущая со времён Win10
-	// функция. Если её нет, стекло просто останется без размытия.
+	// Blur-behind-window — an undocumented function that has existed since
+	// Win10. If it's missing, the glass simply stays without blur.
 	pSetWinCompAttr = user32.NewProc("SetWindowCompositionAttribute")
 )
 
@@ -76,7 +76,7 @@ const (
 	accentDisabled   = 0
 )
 
-// ------------------------------------------------------------------ структуры
+// ------------------------------------------------------------------ structs
 
 type trivertex struct {
 	X, Y                    int32
@@ -98,8 +98,8 @@ type bitmapInfoHeader struct {
 	ClrUsed, ClrImportant        uint32
 }
 
-// mouseInput — INPUT с MOUSEINPUT внутри. Раскладка совпадает с системной на
-// amd64: 4 байта типа, 4 выравнивания, дальше поля мыши.
+// mouseInput — INPUT with a MOUSEINPUT inside. Layout matches the system one
+// on amd64: 4 bytes for the type, 4 for padding, then the mouse fields.
 type mouseInput struct {
 	Type      uint32
 	_         uint32
@@ -120,7 +120,7 @@ type winCompAttrData struct {
 	CbData uintptr
 }
 
-// ------------------------------------------------------------------- обёртки
+// ------------------------------------------------------------------- wrappers
 
 func gradientV(hdc uintptr, r rect, top, bottom uint32) {
 	if r.w() <= 0 || r.h() <= 0 {
@@ -140,7 +140,7 @@ func gradientV(hdc uintptr, r rect, top, bottom uint32) {
 }
 
 func createDIBSection(hdc uintptr, w, h int32) (bmp uintptr, bits unsafe.Pointer) {
-	bi := bitmapInfoHeader{Width: w, Height: -h, Planes: 1, BitCount: 32} // минус = сверху вниз
+	bi := bitmapInfoHeader{Width: w, Height: -h, Planes: 1, BitCount: 32} // negative = top-down
 	bi.Size = uint32(unsafe.Sizeof(bi))
 	r, _, _ := pCreateDIBSect.Call(hdc, uintptr(unsafe.Pointer(&bi)), dibRGBColors,
 		uintptr(unsafe.Pointer(&bits)), 0, 0)
@@ -158,7 +158,8 @@ func updateLayered(hwnd uintptr, pos point, sz size, src uintptr) {
 	runtime.KeepAlive(&bf)
 }
 
-// setCorners скругляет окно. Регион отдаётся системе, освобождать его нельзя.
+// setCorners rounds the window's corners. The region is handed to the
+// system; it must not be freed afterwards.
 func setCorners(h uintptr, w, ht, radius int32) {
 	if h == 0 || w <= 0 || ht <= 0 {
 		return
@@ -175,8 +176,9 @@ func callWindowProc(prev, hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 
 func killTimer(h uintptr, id uintptr) { pKillTimer.Call(h, id) }
 
-// clickAtCursor — одиночный щелчок там, где сейчас курсор. Пока окно помечено
-// WS_EX_TRANSPARENT, система отдаёт его тому, кто лежит под нами.
+// clickAtCursor — a single click wherever the cursor currently is. While the
+// window is marked WS_EX_TRANSPARENT, the system hands the click to whatever
+// lies beneath us.
 func clickAtCursor() {
 	in := [2]mouseInput{
 		{Type: inputMouse, DwFlags: mouseEventLeftDown},
@@ -216,9 +218,9 @@ func roundRect(hdc uintptr, r rect, radius int32) {
 		uintptr(2*radius), uintptr(2*radius))
 }
 
-// setBlurBehind включает системное размытие того, что лежит за окном. Функция
-// недокументированная: если её нет (или система отказала), окно останется
-// просто полупрозрачным — ничего не ломается.
+// setBlurBehind turns on the system's blur of whatever lies behind the
+// window. The function is undocumented: if it's missing (or the system
+// refuses), the window just stays plainly translucent — nothing breaks.
 func setBlurBehind(h uintptr, on bool) {
 	if h == 0 || pSetWinCompAttr.Find() != nil {
 		return
@@ -237,13 +239,13 @@ func setBlurBehind(h uintptr, on bool) {
 	runtime.KeepAlive(&data)
 }
 
-// ---------------------------------------------------------------- цвет
+// ---------------------------------------------------------------- color
 
 func chanOf(c uint32, i uint) int32 { return int32((c >> (8 * i)) & 0xFF) }
 
-// mixColor — цвет ровно между c1 и c2 в доле num/den. Нужен, чтобы полоса
-// глянца заканчивалась тем же цветом, каким в этом месте идёт основной
-// градиент: иначе на их стыке видна ступенька.
+// mixColor — the color exactly between c1 and c2 at fraction num/den. Needed
+// so the gloss band ends at the same color the main gradient has at that
+// point: otherwise a visible step appears at the seam.
 func mixColor(c1, c2 uint32, num, den int32) uint32 {
 	if den <= 0 {
 		return c1
@@ -256,7 +258,7 @@ func mixColor(c1, c2 uint32, num, den int32) uint32 {
 	return out
 }
 
-// shade осветляет (pct > 0) или затемняет (pct < 0) COLORREF на проценты.
+// shade lightens (pct > 0) or darkens (pct < 0) a COLORREF by a percentage.
 func shade(c uint32, pct int32) uint32 {
 	var out uint32
 	for i := uint(0); i < 3; i++ {
@@ -277,21 +279,22 @@ func shade(c uint32, pct int32) uint32 {
 	return out
 }
 
-// ------------------------------------------------------------- сияние букв
+// ------------------------------------------------------------- letter glow
 
 const (
-	// Насколько усиливается размытое пятно и до какой прозрачности ему
-	// разрешено дойти. Потолок низкий: подсветка тусклая, а срезанную им
-	// макушку сферы всё равно закрывает сама буква — она рисуется поверх,
-	// в другом окне.
-	glowGain = 26 // десятых доли, то есть 2.6x
+	// How much the blurred blob is boosted, and the opacity ceiling it's
+	// allowed to reach. The ceiling is low: the highlight stays dim, and the
+	// sphere's top that it clips is covered anyway by the letter itself —
+	// it's drawn on top, in a different window.
+	glowGain = 26 // tenths, i.e. 2.6x
 	glowPeak = 140
 )
 
-// Сияние живёт на отдельном окне между подложкой и основным. Оно рисуется
-// через UpdateLayeredWindow, то есть с настоящей попиксельной прозрачностью:
-// ореол мягко гаснет к краям и не зависит от ползунка подложки. Ключевой цвет
-// так не умеет — им можно сделать только «есть пиксель / нет пикселя».
+// The glow lives in a separate window between the backdrop and the main one.
+// It's drawn via UpdateLayeredWindow, i.e. with real per-pixel transparency:
+// the halo fades softly at the edges and doesn't depend on the backdrop's
+// opacity slider. A color key can't do that — it only gives "pixel present /
+// pixel absent".
 type glowSurface struct {
 	dc, bmp, oldBmp uintptr
 	px              []uint32
@@ -309,8 +312,9 @@ func (g *glowSurface) free() {
 	*g = glowSurface{}
 }
 
-// resize пересоздаёт холст под новый размер окна. Буферы размытия живут рядом
-// с пикселями: пересобирать их на каждую букву — лишний мусор для сборщика.
+// resize recreates the canvas for the new window size. The blur buffers live
+// alongside the pixels: rebuilding them per letter would just be needless
+// garbage for the collector.
 func (g *glowSurface) resize(w, h int32) bool {
 	if w <= 0 || h <= 0 {
 		return false
@@ -351,9 +355,9 @@ func clampi(v, lo, hi int32) int32 {
 	return v
 }
 
-// boxBlur — два прохода бегущей суммой (по строкам, потом по столбцам).
-// Коробочное размытие грубее гауссова, но за два прохода даёт достаточно
-// мягкий край, а стоит O(пиксели) независимо от радиуса.
+// boxBlur — two passes of a running sum (rows, then columns). Box blur is
+// coarser than Gaussian, but two passes give a soft enough edge, and it
+// costs O(pixels) regardless of radius.
 func boxBlur(src, dst, tmp []uint8, w, h, r int32) {
 	if r < 1 {
 		copy(dst, src)
@@ -383,8 +387,8 @@ func boxBlur(src, dst, tmp []uint8, w, h, r int32) {
 	}
 }
 
-// visibleText отдаёт текст, начиная с первой видимой строки поля ввода: ниже
-// него рисуется ровно то же и тем же шрифтом, что показывает EDIT.
+// visibleText returns the text starting at the edit control's first visible
+// line: below it, we draw exactly what EDIT shows, in the same font.
 func (a *app) visibleText() []uint16 {
 	n := int(sendMessage(a.hEdit, wmGetTextLength, 0, 0))
 	if n == 0 {
@@ -401,10 +405,10 @@ func (a *app) visibleText() []uint16 {
 	return buf[idx:n]
 }
 
-// renderGlow перерисовывает ореол. Порядок такой: рисуем текст белым по
-// чёрному холсту, из яркости получаем маску, маску размываем двумя радиусами
-// (тугой — «жирный контур», широкий — само сияние) и уже из неё собираем
-// пиксели с предумноженной альфой, как того требует UpdateLayeredWindow.
+// renderGlow redraws the halo. The order is: draw the text white on a black
+// canvas, turn the brightness into a mask, blur the mask at two radii (tight
+// — a "bold outline", wide — the glow itself), then build premultiplied-alpha
+// pixels from it, as UpdateLayeredWindow requires.
 func (a *app) renderGlow() {
 	if a.hGlow == 0 {
 		return
@@ -438,30 +442,30 @@ func (a *app) renderGlow() {
 	selectObject(g.dc, oldFont)
 
 	for i, p := range g.px {
-		g.mask[i] = uint8(p & 0xFF) // текст белый — любой канал годится
+		g.mask[i] = uint8(p & 0xFF) // text is white — any channel works
 	}
 
-	// Радиус размытия — половина кегля. На таком радиусе от глифа не
-	// остаётся формы: каждая буква расплывается в круглое пятно, и под
-	// строкой лежит цепочка мягких сфер, а не обведённые по контуру буквы.
-	// Прежде к ореолу подмешивались сама маска и тугое размытие — выходила
-	// вторая, размазанная копия буквы поверх настоящей.
+	// Blur radius is half the font size. At that radius the glyph keeps no
+	// shape: each letter smears into a round blob, and under the line lies a
+	// chain of soft spheres rather than outlined letters. Previously the
+	// glow also blended in the raw mask and a tight blur — that produced a
+	// second, smeared copy of the letter on top of the real one.
 	fontPx := int32(a.cfg.FontSize) * a.dpi / 72
 	r := clampi(fontPx/2, 3, 48)
-	// Размываем дважды: одного коробочного прохода мало — он обрывается
-	// ступенькой и вокруг слов встают квадратные пятна. Второй проход
-	// превращает ступеньку в плавный спад. Размывать на месте можно:
-	// первый проход целиком перекладывает картинку во временный буфер,
-	// и дальше исходный уже не читается.
+	// Blur twice: a single box-blur pass isn't enough — it cuts off in a
+	// step and square blobs appear around words. The second pass turns the
+	// step into a smooth falloff. Blurring in place is fine: the first pass
+	// moves the whole image into a temporary buffer, so the source is no
+	// longer read afterward.
 	boxBlur(g.mask, g.halo, g.tmp, g.w, g.h, r)
 	boxBlur(g.halo, g.halo, g.tmp, g.w, g.h, r)
 
 	pal := palettes[a.cfg.Palette%len(palettes)]
 	gr, gg, gb := chanOf(pal.glow, 0), chanOf(pal.glow, 1), chanOf(pal.glow, 2)
 	for i := range g.px {
-		// Размазанное по такому радиусу пятно само по себе бледное, поэтому
-		// его усиливаем — но с потолком: сфера должна оставаться тусклой
-		// подсветкой, а не светиться ярче самой буквы.
+		// A blob smeared over this radius is faint on its own, so we boost
+		// it — but with a ceiling: the sphere must stay a dim highlight, not
+		// glow brighter than the letter itself.
 		al := int32(g.halo[i]) * glowGain / 10
 		if al > glowPeak {
 			al = glowPeak
@@ -470,35 +474,36 @@ func (a *app) renderGlow() {
 			g.px[i] = 0
 			continue
 		}
-		// COLORREF — 0x00BBGGRR, пиксель DIB — 0x00RRGGBB: красный и синий
-		// в нём меняются местами.
+		// COLORREF is 0x00BBGGRR, a DIB pixel is 0x00RRGGBB: red and blue
+		// swap places.
 		g.px[i] = uint32(al)<<24 | uint32(gr*al/255)<<16 | uint32(gg*al/255)<<8 | uint32(gb*al/255)
 	}
 
 	if !a.glowShown {
 		showWindow(a.hGlow, swShowNA)
 		a.glowShown = true
-		a.syncBackdrop() // вернуть окно на своё место в z-порядке
+		a.syncBackdrop() // put the window back in its place in the z-order
 	}
 	updateLayered(a.hGlow, point{wr.Left, wr.Top}, size{g.w, g.h}, g.dc)
 }
 
-// ------------------------------------------------------------ стекло подложки
+// ------------------------------------------------------------ backdrop glass
 
-// paintGlass рисует «жидкое стекло»: корпус градиентом, глянцевый верх,
-// отблеск снизу и светлый ободок по краю. Всё это лежит на окне-подложке,
-// поэтому целиком подчиняется ползунку прозрачности, а буквы — нет.
+// paintGlass draws the "liquid glass": the body as a gradient, a glossy top,
+// a bottom highlight, and a light rim along the edge. All of this lives on
+// the backdrop window, so it fully obeys the opacity slider, unlike the
+// letters.
 func (a *app) paintGlass(hdc uintptr, c rect) {
 	base := palettes[a.cfg.Palette%len(palettes)].marker
 	r := rect{0, 0, c.w(), c.h()}
 	top, bottom := shade(base, 18), shade(base, -20)
 	gradientV(hdc, r, top, bottom)
 
-	// верхняя треть — глянец, как отражение неба на крышке
+	// top third — gloss, like a reflection of the sky on the lid
 	cut := r.Bottom * 38 / 100
 	gradientV(hdc, rect{0, 0, r.Right, cut}, shade(base, 42), mixColor(top, bottom, cut, r.Bottom))
 
-	// узкая подсветка у самого низа: без неё стекло выглядит плоским
+	// a thin highlight right at the bottom: without it the glass looks flat
 	lift := r.Bottom - a.scale(20)
 	gradientV(hdc, rect{0, lift, r.Right, r.Bottom},
 		mixColor(top, bottom, lift, r.Bottom), shade(base, 10))

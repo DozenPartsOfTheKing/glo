@@ -1,10 +1,10 @@
 .DS_Store
 
-# Промежуточные сборки. Рабочий exe — Glo.exe в корне, он в репозитории.
+# Intermediate builds. The working exe is Glo.exe in root, it's in the repo.
 src-go/out_test.exe
 src-go/*_test.exe
 
-# Остались от старых названий, можно удалить с диска.
+# Left over from old names, can be deleted from disk.
 Прозрачный блокнот.exe
 Прозрачный блокнот.bat
 Glasspad.exe

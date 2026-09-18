@@ -1,11 +1,11 @@
 //go:build windows
 
-// Журнал для отлова зависаний. Пишется в %AppData%\Glasspad\debug.log,
-// перезаписывается при каждом запуске.
+// Log for catching hangs. Written to %AppData%\Glasspad\debug.log,
+// overwritten on every launch.
 //
-// Запись идёт обычным WriteFile без буферизации в процессе: данные сразу
-// уходят в кеш ОС и переживают даже принудительное снятие задачи. Поэтому
-// последняя строка журнала — это ровно то место, где программа встала.
+// Writes go through plain WriteFile with no in-process buffering: data goes
+// straight to the OS cache and survives even a forced task kill. So the
+// last line in the log is exactly where the program got stuck.
 package main
 
 import (
@@ -25,7 +25,7 @@ func openLog(dir string) {
 	if f, err := os.Create(filepath.Join(dir, "debug.log")); err == nil {
 		logFile = f
 	}
-	logf("=== Glasspad старт, pid %d, аргументы %v", os.Getpid(), os.Args[1:])
+	logf("=== Glasspad start, pid %d, args %v", os.Getpid(), os.Args[1:])
 }
 
 func logf(format string, args ...interface{}) {
@@ -43,8 +43,8 @@ func closeLog() {
 	}
 }
 
-// Сообщения, которые сыплются пачками при каждом движении мыши, — их в журнал
-// не пускаем, иначе полезное утонет.
+// Messages that flood in on every mouse move — we don't let them into the
+// log, or the useful stuff would drown.
 func noisyMsg(m uintptr) bool {
 	switch m {
 	case 0x0200, // WM_MOUSEMOVE
@@ -53,14 +53,14 @@ func noisyMsg(m uintptr) bool {
 		0x00A0, // WM_NCMOUSEMOVE
 		0x02A0, // WM_NCMOUSEHOVER
 		0x02A3, // WM_MOUSELEAVE
-		0x0113: // WM_TIMER — вместо него идёт отдельный heartbeat
+		0x0113: // WM_TIMER — a separate heartbeat is used instead
 		return true
 	}
 	return false
 }
 
-// logMsgIn/logMsgOut ставят вокруг обработчика пару меток. Если в журнале
-// есть «IN #42», но нет «OUT #42» — программа встала именно на этом сообщении.
+// logMsgIn/logMsgOut place a pair of markers around the handler. If the log
+// has "IN #42" but no "OUT #42" — the program got stuck on that exact message.
 func logMsgIn(tag string, m uintptr) int {
 	if logFile == nil || noisyMsg(m) {
 		return 0

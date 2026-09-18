@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Glasspad — прозрачный блокнот поверх всех окон, прозрачность 0-100%.
+Glasspad — a transparent notepad on top of all windows, opacity 0-100%.
 
-Запуск:  python glasspad.py
+Run:  python glasspad.py
 """
 
 import json
@@ -15,12 +15,12 @@ IS_WIN = sys.platform.startswith("win")
 if IS_WIN:
     import ctypes
 
-# %AppData%\Glasspad — общая папка с exe-версией, файлы у них одни и те же.
+# %AppData%\Glasspad — shared folder with the exe version, they use the same files.
 APP_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Glasspad")
 CFG_PATH = os.path.join(APP_DIR, "settings.json")
 NOTE_PATH = os.path.join(APP_DIR, "note.txt")
 
-# Цвет-ключ: пиксели этого цвета становятся полностью прозрачными (только Windows).
+# Color key: pixels of this color become fully transparent (Windows only).
 MAGIC = "#ff00fe"
 
 BAR_BG = "#1c1c22"
@@ -28,14 +28,14 @@ BAR_FG = "#9aa0aa"
 BAR_HOT = "#ffffff"
 PANEL_BG = "#0e0f13"
 
-# Режимы фона
-MODE_PANEL = "panel"    # сплошная панель, вся затемняется прозрачностью
-MODE_MARKER = "marker"  # фон насквозь, под буквами — плашка маркера
-MODE_TEXT = "text"      # фон насквозь, только буквы
+# Background modes
+MODE_PANEL = "panel"    # solid panel, the whole thing dims with transparency
+MODE_MARKER = "marker"  # background see-through, a marker highlight under the letters
+MODE_TEXT = "text"      # background see-through, letters only
 MODES = [MODE_PANEL, MODE_MARKER, MODE_TEXT]
 MODE_NAMES = {MODE_PANEL: "Панель", MODE_MARKER: "Маркер", MODE_TEXT: "Текст"}
 
-# (название, цвет текста, цвет плашки-маркера)
+# (name, text color, marker-highlight color)
 PALETTES = [
     ("Белый",   "#ffffff", "#000000"),
     ("Чёрный",  "#000000", "#ffffff"),
@@ -89,7 +89,7 @@ class TransparentNotepad(object):
             self.toggle_compact()
 
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
-        # Окно без рамки в Windows не всегда само забирает фокус клавиатуры.
+        # A frameless window on Windows doesn't always grab keyboard focus on its own.
         self.root.after(120, self.root.focus_force)
         if IS_WIN:
             self.root.after(150, self._poll_hotkeys)
@@ -112,7 +112,7 @@ class TransparentNotepad(object):
             bg=BAR_BG, fg=BAR_FG, troughcolor="#2b2d36", activebackground="#ffffff",
         )
         self.scale.set(self.cfg["alpha"])
-        self.scale.config(command=self._on_scale)  # только после set(), иначе ранний вызов
+        self.scale.config(command=self._on_scale)  # only after set(), otherwise it fires early
         self.scale.pack(side="left", pady=6)
 
         self.pct = tk.Label(self.bar, text="%d%%" % self.cfg["alpha"], bg=BAR_BG,
@@ -215,13 +215,13 @@ class TransparentNotepad(object):
             "<Control-minus>": lambda: self.font_step(-1),
             "<Control-Alt-e>": self.toggle_clickthrough,
         }
-        # Бинд на самом Text с "break" — иначе сработают ещё и штатные
-        # бинды класса Text (Ctrl+O — перевод строки, Ctrl+H — backspace и т.д.).
+        # Bind on the Text widget itself with "break" — otherwise the Text class's
+        # built-in bindings also fire (Ctrl+O — newline, Ctrl+H — backspace, etc.).
         for seq, fn in keys.items():
             for widget in (self.text, self.root):
                 widget.bind(seq, lambda e, f=fn: (f(), "break")[1])
 
-    # ------------------------------------------------------- прозрачность
+    # ------------------------------------------------------- transparency
 
     def _on_scale(self, value):
         self.apply_alpha(int(float(value)))
@@ -235,7 +235,7 @@ class TransparentNotepad(object):
     def bump_alpha(self, delta):
         self.scale.set(max(0, min(100, self.cfg["alpha"] + delta)))
 
-    # ------------------------------------------------------------ режимы
+    # ------------------------------------------------------------ modes
 
     def apply_mode(self):
         want = self.cfg["mode"] in (MODE_MARKER, MODE_TEXT)
@@ -250,7 +250,7 @@ class TransparentNotepad(object):
         self._retag()
 
     def _set_transparent_color(self, on):
-        """Прозрачный фон умеет только Windows. Возвращает True, если получилось."""
+        """Transparent background is Windows-only. Returns True if it worked."""
         try:
             self.root.attributes("-transparentcolor", MAGIC if on else "")
             return on
@@ -266,7 +266,7 @@ class TransparentNotepad(object):
         self.text.configure(fg=fg, insertbackground=fg,
                             selectbackground=fg, selectforeground=hl)
         self.text.tag_configure("marker", background=hl)
-        self.btn_pal.config(fg=fg, bg=hl)  # мини-образец: буквы на маркере
+        self.btn_pal.config(fg=fg, bg=hl)  # mini swatch: letters on the marker
         self._retag()
 
     def cycle_palette(self):
@@ -274,7 +274,7 @@ class TransparentNotepad(object):
         self.apply_palette()
 
     def toggle_bw(self):
-        """Белые буквы на чёрном маркере <-> чёрные на белом."""
+        """White letters on black marker <-> black on white."""
         self.cfg["palette"] = 1 if self.cfg["palette"] != 1 else 0
         self.apply_palette()
 
@@ -309,7 +309,7 @@ class TransparentNotepad(object):
         else:
             self.bar.pack(side="top", fill="x", before=self.text)
 
-    # ------------------------------------------------- плашка под буквами
+    # ------------------------------------------------- highlight under the letters
 
     def _on_modified(self, _event=None):
         if self.text.edit_modified():
@@ -324,7 +324,7 @@ class TransparentNotepad(object):
         if self.cfg["mode"] == MODE_MARKER:
             self.text.tag_add("marker", "1.0", "end-1c")
 
-    # --------------------------------------------------- перетаскивание
+    # --------------------------------------------------- dragging
 
     def _drag_start(self, event):
         self._drag = (event.x_root - self.root.winfo_x(),
@@ -347,7 +347,7 @@ class TransparentNotepad(object):
         h = max(120, h0 + (event.y_root - y0))
         self.root.geometry("%dx%d" % (w, h))
 
-    # ------------------------------------------------------ сквозной клик
+    # ------------------------------------------------------ click-through
 
     def _hwnd(self):
         return ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
@@ -371,7 +371,7 @@ class TransparentNotepad(object):
         set_(hwnd, GWL_EXSTYLE, style)
         self.btn_click.config(fg="#ff6b6b" if self.clickthrough else BAR_FG)
 
-    # ------------------------------------- глобальные хоткеи (Windows)
+    # ------------------------------------- global hotkeys (Windows)
 
     def _pressed(self, vk):
         return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
@@ -399,7 +399,7 @@ class TransparentNotepad(object):
             pass
         self.root.after(120, self._poll_hotkeys)
 
-    # -------------------------------------------------------- файлы
+    # -------------------------------------------------------- files
 
     def open_file(self):
         path = filedialog.askopenfilename(
