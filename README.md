@@ -3,7 +3,7 @@
 **A glowing sticky note that floats above every window on Windows.**
 Transparent glass, fully opaque text, neon glow, and double-click to click *through* the note.
 
-<!-- Demo GIF goes here: docs/demo.gif (glass slider → glow → double-click through to the app below) -->
+![Glo demo](docs/demo.gif)
 
 [Русская версия](README.ru.md)
 
