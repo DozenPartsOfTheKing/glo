@@ -23,7 +23,7 @@ so the text fades with it. Glo keeps them separate:
 - **One portable exe, ~2.5 MB.** No installer, no runtime, no dependencies, no network access.
   Pure Go + Win32.
 - Autosaves every 5 seconds.
-- **5 languages:** English, Русский, Español, 中文, Français — picked from your Windows display language.
+- **5 languages:** English, Русский, Español, 中文, Français — picked from Windows or switched in Settings.
 
 ## Install
 
@@ -45,7 +45,7 @@ Requires 64-bit Windows 10 or 11.
 | `Aa` | Left-click: white ↔ black text. Right-click: cycle colors |
 | Glow | Neon halo on/off |
 | Marker | Solid background under the text |
-| Settings | Everything else: always on top, frosted glass, tray icon, taskbar button, files |
+| Settings | Everything else: always on top, frosted glass, language, tray icon, taskbar button, files |
 
 Move the window by an empty spot of the toolbar. Resize by edges and corners.
 
@@ -71,7 +71,8 @@ Turn it off with `Ctrl+Alt+E` or from the tray icon menu.
 
 The note and settings live in `%AppData%\Glasspad\` (`note.txt`, `settings.json`).
 
-To force a UI language, set the environment variable `GLO_LANG` to `en`, `ru`, `es`, `zh` or `fr`.
+Switch the UI language in **Settings → Language**; it applies instantly and is remembered.
+"Auto" follows Windows, or the environment variable `GLO_LANG` (`en`, `ru`, `es`, `zh`, `fr`) if set.
 All UI strings live in `src-go/i18n.go` — translations and new languages are welcome.
 
 ## Build

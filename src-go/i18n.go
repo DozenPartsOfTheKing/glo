@@ -1,11 +1,12 @@
 //go:build windows
 
-// UI language: picked from the Windows display language, English for anything
-// not listed below. GLO_LANG=en|ru|es|zh|fr overrides the detection, which is
-// handy for checking every translation on one machine.
+// UI language. The settings menu picks one explicitly (saved in
+// settings.json as "lang"); "auto" follows GLO_LANG if set, otherwise the
+// Windows display language, English for anything not listed below.
 //
 // All user-visible strings live in this file. To add a language: add a lang
-// constant, a case in detectLang and one more argument to every tr call.
+// constant, its code and name, a case in systemLang and one more argument to
+// every tr call.
 package main
 
 import (
@@ -21,24 +22,32 @@ const (
 	langFR
 )
 
+// Codes as stored in settings.json, and names as shown in the menu: each
+// language is named in itself, so it can be found from any other one.
+var (
+	langCodes = []string{"en", "ru", "es", "zh", "fr"}
+	langNames = []string{"English", "Русский", "Español", "中文", "Français"}
+)
+
 var pGetUserDefaultUILanguage = kernel32.NewProc("GetUserDefaultUILanguage")
 
-// uiLang is computed before palettes and modeNames: Go initializes package
-// variables in dependency order, and those call tr.
-var uiLang = detectLang()
+var uiLang = langEN
 
-func detectLang() int {
-	switch strings.ToLower(os.Getenv("GLO_LANG")) {
-	case "en":
-		return langEN
-	case "ru":
-		return langRU
-	case "es":
-		return langES
-	case "zh":
-		return langZH
-	case "fr":
-		return langFR
+// Strings must exist before main runs: loadConfig already reads modeNames.
+func init() { setLang("") }
+
+func langIndex(code string) int {
+	for i, c := range langCodes {
+		if c == code {
+			return i
+		}
+	}
+	return -1
+}
+
+func systemLang() int {
+	if i := langIndex(strings.ToLower(os.Getenv("GLO_LANG"))); i >= 0 {
+		return i
 	}
 	r, _, _ := pGetUserDefaultUILanguage.Call()
 	switch r & 0x3FF { // low 10 bits of a LANGID are the primary language
@@ -54,22 +63,79 @@ func detectLang() int {
 	return langEN
 }
 
+// setLang switches the UI language; "" or an unknown code means auto.
+func setLang(code string) {
+	uiLang = langIndex(code)
+	if uiLang < 0 {
+		uiLang = systemLang()
+	}
+	loadStrings()
+}
+
 // tr picks the string for the UI language. Argument order: en, ru, es, zh, fr.
 func tr(en, ru, es, zh, fr string) string {
 	return [...]string{en, ru, es, zh, fr}[uiLang]
 }
 
 var (
-	txtNoMarker = tr("No marker", "Без плашки", "Sin resaltado", "无底色", "Sans surlignage")
-	txtMarker   = tr("Marker", "Маркер", "Resaltado", "底色", "Surlignage")
+	// UI strings, filled by loadStrings.
+	txtNoMarker,
+	txtMarker,
+	txtWhite,
+	txtBlack,
+	txtRed,
+	txtGreen,
+	txtBlue,
+	txtCyan,
+	txtPink,
+	txtYellow,
+	txtTrayTip,
+	txtGlow,
+	txtSettings,
+	txtGlassOpacity,
+	txtFontSize,
+	txtTextColor,
+	txtTextGlow,
+	txtMarkerBG,
+	txtFrostedGlass,
+	txtAlwaysOnTop,
+	txtDropBelow,
+	txtClickThrough,
+	txtHideToolbar,
+	txtTrayIcon,
+	txtTaskbarButton,
+	txtOpenFile,
+	txtSaveAs,
+	txtNoteFolder,
+	txtExit,
+	txtHide,
+	txtShow,
+	txtClickThroughOff,
+	txtClose,
+	txtOpenFailed,
+	txtSaveFailed,
+	txtFileFilter,
+	txtLanguage,
+	txtLangAuto string
 
-	txtWhite  = tr("White", "Белый", "Blanco", "白色", "Blanc")
-	txtBlack  = tr("Black", "Чёрный", "Negro", "黑色", "Noir")
-	txtRed    = tr("Red", "Красный", "Rojo", "红色", "Rouge")
-	txtGreen  = tr("Green", "Зелёный", "Verde", "绿色", "Vert")
-	txtBlue   = tr("Blue", "Синий", "Azul", "蓝色", "Bleu")
-	txtCyan   = tr("Cyan", "Циан", "Cian", "青色", "Cyan")
-	txtPink   = tr("Pink", "Розовый", "Rosa", "粉色", "Rose")
+	modeNames   []string
+	txtColors   []string // palette names, same order as palettes
+	welcomeNote string
+)
+
+// loadStrings fills every UI string for uiLang. Called again when the
+// language changes, so nothing may cache these values across a switch.
+func loadStrings() {
+	txtNoMarker = tr("No marker", "Без плашки", "Sin resaltado", "无底色", "Sans surlignage")
+	txtMarker = tr("Marker", "Маркер", "Resaltado", "底色", "Surlignage")
+
+	txtWhite = tr("White", "Белый", "Blanco", "白色", "Blanc")
+	txtBlack = tr("Black", "Чёрный", "Negro", "黑色", "Noir")
+	txtRed = tr("Red", "Красный", "Rojo", "红色", "Rouge")
+	txtGreen = tr("Green", "Зелёный", "Verde", "绿色", "Vert")
+	txtBlue = tr("Blue", "Синий", "Azul", "蓝色", "Bleu")
+	txtCyan = tr("Cyan", "Циан", "Cian", "青色", "Cyan")
+	txtPink = tr("Pink", "Розовый", "Rosa", "粉色", "Rose")
 	txtYellow = tr("Yellow", "Жёлтый", "Amarillo", "黄色", "Jaune")
 
 	txtTrayTip = tr(
@@ -80,32 +146,36 @@ var (
 		"Glo — clic droit : menu, double-clic : afficher/masquer")
 
 	// toolbar
-	txtGlow     = tr("Glow", "Сияние", "Brillo", "发光", "Lueur")
+	txtGlow = tr("Glow", "Сияние", "Brillo", "发光", "Lueur")
 	txtSettings = tr("Settings", "Настройки", "Ajustes", "设置", "Réglages")
 
 	// settings menu
-	txtGlassOpacity  = tr("Glass opacity", "Прозрачность подложки", "Opacidad del cristal", "玻璃不透明度", "Opacité du verre")
-	txtFontSize      = tr("Font size", "Размер шрифта", "Tamaño de fuente", "字号", "Taille de police")
-	txtTextColor     = tr("Text color", "Цвет букв", "Color del texto", "文字颜色", "Couleur du texte")
-	txtTextGlow      = tr("Text glow", "Сияние букв", "Brillo del texto", "文字发光", "Lueur du texte")
-	txtMarkerBG      = tr("Marker background", "Плашка маркера", "Fondo resaltado", "文字底色", "Surlignage du texte")
-	txtFrostedGlass  = tr("Frosted glass", "Матовое стекло", "Cristal esmerilado", "磨砂玻璃", "Verre dépoli")
-	txtAlwaysOnTop   = tr("Always on top", "Поверх всех окон", "Siempre visible", "窗口置顶", "Toujours au premier plan")
-	txtDropBelow     = tr("Double-click sends window back", "Двойной щелчок уводит окно вниз", "Doble clic envía la ventana atrás", "双击后窗口移到底层", "Double-clic : fenêtre en arrière-plan")
-	txtClickThrough  = tr("Click-through mode", "Сквозной клик насовсем", "Modo clic a través", "鼠标穿透模式", "Mode clic traversant")
-	txtHideToolbar   = tr("Hide this toolbar", "Скрыть эту панель", "Ocultar esta barra", "隐藏工具栏", "Masquer cette barre")
-	txtTrayIcon      = tr("Tray icon", "Значок у часов", "Icono en la bandeja", "托盘图标", "Icône de notification")
+	txtGlassOpacity = tr("Glass opacity", "Прозрачность подложки", "Opacidad del cristal", "玻璃不透明度", "Opacité du verre")
+	txtFontSize = tr("Font size", "Размер шрифта", "Tamaño de fuente", "字号", "Taille de police")
+	txtTextColor = tr("Text color", "Цвет букв", "Color del texto", "文字颜色", "Couleur du texte")
+	txtTextGlow = tr("Text glow", "Сияние букв", "Brillo del texto", "文字发光", "Lueur du texte")
+	txtMarkerBG = tr("Marker background", "Плашка маркера", "Fondo resaltado", "文字底色", "Surlignage du texte")
+	txtFrostedGlass = tr("Frosted glass", "Матовое стекло", "Cristal esmerilado", "磨砂玻璃", "Verre dépoli")
+	txtAlwaysOnTop = tr("Always on top", "Поверх всех окон", "Siempre visible", "窗口置顶", "Toujours au premier plan")
+	txtDropBelow = tr("Double-click sends window back", "Двойной щелчок уводит окно вниз", "Doble clic envía la ventana atrás", "双击后窗口移到底层", "Double-clic : fenêtre en arrière-plan")
+	txtClickThrough = tr("Click-through mode", "Сквозной клик насовсем", "Modo clic a través", "鼠标穿透模式", "Mode clic traversant")
+	txtHideToolbar = tr("Hide this toolbar", "Скрыть эту панель", "Ocultar esta barra", "隐藏工具栏", "Masquer cette barre")
+	txtTrayIcon = tr("Tray icon", "Значок у часов", "Icono en la bandeja", "托盘图标", "Icône de notification")
 	txtTaskbarButton = tr("Taskbar button", "Кнопка в панели задач", "Botón en la barra de tareas", "任务栏按钮", "Bouton dans la barre des tâches")
-	txtOpenFile      = tr("Open file…", "Открыть файл…", "Abrir archivo…", "打开文件…", "Ouvrir un fichier…")
-	txtSaveAs        = tr("Save as…", "Сохранить как…", "Guardar como…", "另存为…", "Enregistrer sous…")
-	txtNoteFolder    = tr("Open note folder", "Папка с заметкой", "Abrir carpeta de la nota", "打开便签文件夹", "Ouvrir le dossier de la note")
-	txtExit          = tr("Exit", "Выход", "Salir", "退出", "Quitter")
+	txtOpenFile = tr("Open file…", "Открыть файл…", "Abrir archivo…", "打开文件…", "Ouvrir un fichier…")
+	txtSaveAs = tr("Save as…", "Сохранить как…", "Guardar como…", "另存为…", "Enregistrer sous…")
+	txtNoteFolder = tr("Open note folder", "Папка с заметкой", "Abrir carpeta de la nota", "打开便签文件夹", "Ouvrir le dossier de la note")
+	txtExit = tr("Exit", "Выход", "Salir", "退出", "Quitter")
+	// Always also says "Language" in English, so a user stuck in an
+	// unfamiliar language can still find the way back.
+	txtLanguage = tr("Language", "Язык (Language)", "Idioma (Language)", "语言 (Language)", "Langue (Language)")
+	txtLangAuto = tr("Auto (as in Windows)", "Авто (как в Windows)", "Automático (como en Windows)", "自动（跟随 Windows）", "Auto (comme Windows)")
 
 	// tray menu
-	txtHide            = tr("Hide", "Свернуть", "Ocultar", "隐藏", "Masquer")
-	txtShow            = tr("Show", "Развернуть", "Mostrar", "显示", "Afficher")
+	txtHide = tr("Hide", "Свернуть", "Ocultar", "隐藏", "Masquer")
+	txtShow = tr("Show", "Развернуть", "Mostrar", "显示", "Afficher")
 	txtClickThroughOff = tr("Turn off click-through", "Выключить сквозной клик", "Desactivar clic a través", "关闭鼠标穿透", "Désactiver le clic traversant")
-	txtClose           = tr("Close", "Закрыть", "Cerrar", "关闭", "Fermer")
+	txtClose = tr("Close", "Закрыть", "Cerrar", "关闭", "Fermer")
 
 	txtOpenFailed = tr("Could not open file:\n", "Не удалось открыть файл:\n",
 		"No se pudo abrir el archivo:\n", "无法打开文件：\n", "Impossible d’ouvrir le fichier :\n")
@@ -119,11 +189,13 @@ var (
 		"Archivos de texto (*.txt)\x00*.txt\x00Todos los archivos (*.*)\x00*.*\x00",
 		"文本文件 (*.txt)\x00*.txt\x00所有文件 (*.*)\x00*.*\x00",
 		"Fichiers texte (*.txt)\x00*.txt\x00Tous les fichiers (*.*)\x00*.*\x00")
-)
 
-// First-run text: the program ships as a single file with no docs next to it,
-// so it explains itself. It is erased like any other text.
-var welcomeNote = tr(`Glo — a note that stays on top of all windows.
+	modeNames = []string{txtNoMarker, txtMarker}
+	txtColors = []string{txtWhite, txtBlack, txtRed, txtGreen, txtBlue, txtCyan, txtPink, txtYellow}
+
+	// First-run text: the program ships as a single file with no docs next to it,
+	// so it explains itself. It is erased like any other text.
+	welcomeNote = tr(`Glo — a note that stays on top of all windows.
 
 To close: the cross at the right of the toolbar, Alt+F4,
 or right-click the tray icon -> Exit.
@@ -147,7 +219,7 @@ Text saves itself every 5 seconds.
 
 You can delete this text.`,
 
-	`Glo — заметка поверх всех окон.
+		`Glo — заметка поверх всех окон.
 
 Как закрыть: крестик справа в панельке, Alt+F4,
 или правый клик по значку у часов -> Выход.
@@ -171,7 +243,7 @@ Ctrl+H прячет панель, Ctrl+Alt+H — всё окно целиком.
 
 Этот текст можно стереть.`,
 
-	`Glo — una nota que siempre está encima de todas las ventanas.
+		`Glo — una nota que siempre está encima de todas las ventanas.
 
 Para cerrar: la cruz a la derecha de la barra, Alt+F4,
 o clic derecho en el icono de la bandeja -> Salir.
@@ -195,7 +267,7 @@ El texto se guarda solo cada 5 segundos.
 
 Puedes borrar este texto.`,
 
-	`Glo — 始终置顶的便签。
+		`Glo — 始终置顶的便签。
 
 关闭方法：工具栏右侧的叉号、Alt+F4，
 或右键托盘图标 -> 退出。
@@ -218,7 +290,7 @@ Ctrl+H 隐藏工具栏，Ctrl+Alt+H 隐藏整个窗口。
 
 这段文字可以删除。`,
 
-	`Glo — une note qui reste au-dessus de toutes les fenêtres.
+		`Glo — une note qui reste au-dessus de toutes les fenêtres.
 
 Pour fermer : la croix à droite de la barre, Alt+F4,
 ou clic droit sur l’icône de notification -> Quitter.
@@ -241,3 +313,4 @@ Ctrl+H masque la barre, Ctrl+Alt+H masque toute la fenêtre.
 Le texte s’enregistre tout seul toutes les 5 secondes.
 
 Vous pouvez effacer ce texte.`)
+}

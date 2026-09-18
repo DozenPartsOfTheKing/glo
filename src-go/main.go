@@ -45,10 +45,9 @@ const (
 	modeMarker = 1
 )
 
-var modeNames = []string{txtNoMarker, txtMarker}
+// modeNames is filled by loadStrings in i18n.go.
 
 type palette struct {
-	name   string
 	fg     uint32 // the letters themselves
 	marker uint32 // the plate behind the letters, also the glass color
 	glow   uint32 // the halo around the letters in glow mode
@@ -61,14 +60,14 @@ type palette struct {
 // indistinguishable from the letters themselves, so there it's dark gray
 // and works as a shadow.
 var palettes = []palette{
-	{txtWhite, rgb(255, 255, 255), rgb(0, 0, 0), rgb(70, 70, 70)},
-	{txtBlack, rgb(0, 0, 0), rgb(255, 255, 255), rgb(255, 255, 255)},
-	{txtRed, rgb(255, 95, 95), rgb(24, 0, 0), rgb(255, 255, 255)},
-	{txtGreen, rgb(105, 255, 150), rgb(0, 22, 8), rgb(255, 255, 255)},
-	{txtBlue, rgb(120, 175, 255), rgb(0, 6, 28), rgb(255, 255, 255)},
-	{txtCyan, rgb(95, 250, 255), rgb(0, 20, 22), rgb(255, 255, 255)},
-	{txtPink, rgb(255, 120, 225), rgb(22, 0, 18), rgb(255, 255, 255)},
-	{txtYellow, rgb(255, 225, 95), rgb(22, 15, 0), rgb(255, 255, 255)},
+	{rgb(255, 255, 255), rgb(0, 0, 0), rgb(70, 70, 70)},
+	{rgb(0, 0, 0), rgb(255, 255, 255), rgb(255, 255, 255)},
+	{rgb(255, 95, 95), rgb(24, 0, 0), rgb(255, 255, 255)},
+	{rgb(105, 255, 150), rgb(0, 22, 8), rgb(255, 255, 255)},
+	{rgb(120, 175, 255), rgb(0, 6, 28), rgb(255, 255, 255)},
+	{rgb(95, 250, 255), rgb(0, 20, 22), rgb(255, 255, 255)},
+	{rgb(255, 120, 225), rgb(22, 0, 18), rgb(255, 255, 255)},
+	{rgb(255, 225, 95), rgb(22, 15, 0), rgb(255, 255, 255)},
 }
 
 const (
@@ -109,6 +108,7 @@ const (
 	cmdPalBase   = 300
 	cmdSizeBase  = 340
 	cmdAlphaBase = 380
+	cmdLangBase  = 420 // 0 = auto, then langCodes in order
 )
 
 var alphaPresets = []int{0, 25, 50, 75, 100}
@@ -152,10 +152,12 @@ type config struct {
 	Compact   bool `json:"compact"`
 	Tray      bool `json:"tray"`
 	Taskbar   bool `json:"taskbar"`
-	X         int  `json:"x"`
-	Y         int  `json:"y"`
-	W         int  `json:"w"`
-	H         int  `json:"h"`
+	// UI language code from langCodes; empty means auto.
+	Lang string `json:"lang,omitempty"`
+	X    int    `json:"x"`
+	Y    int    `json:"y"`
+	W    int    `json:"w"`
+	H    int    `json:"h"`
 }
 
 func defaultConfig() config {
@@ -228,6 +230,7 @@ func main() {
 	setProcessDPIAware()
 	a.initPaths()
 	a.cfg = loadConfig(a.cfgPath)
+	setLang(a.cfg.Lang)
 
 	dc := getDC(0)
 	a.dpi = getDeviceCaps(dc, logPixelsY)
@@ -664,6 +667,28 @@ func (a *app) removeTrayIcon() {
 	}
 }
 
+// setLanguage switches the UI language on the fly. The toolbar and menus are
+// rebuilt from the txt* strings on every paint/open, so only the tray tooltip
+// and an untouched welcome note need a push.
+func (a *app) setLanguage(code string) {
+	oldWelcome := welcomeNote
+	a.cfg.Lang = code
+	setLang(code)
+
+	if strings.ReplaceAll(a.text(), "\r\n", "\n") == oldWelcome {
+		a.setText(welcomeNote)
+		a.savedText = a.text()
+	}
+	if a.tray.CbSize != 0 {
+		a.tray.SzTip = [len(a.tray.SzTip)]uint16{}
+		copy(a.tray.SzTip[:len(a.tray.SzTip)-1], utf16.Encode([]rune(txtTrayTip)))
+		shellNotifyIcon(nimModify, &a.tray)
+	}
+	a.saveConfig()
+	invalidate(a.hwnd, nil)
+	a.renderGlow()
+}
+
 // ------------------------------------------------------------ settings menu
 
 func (a *app) settingsMenu(x, y int32) {
@@ -678,15 +703,21 @@ func (a *app) settingsMenu(x, y int32) {
 			label: strconv.Itoa(v), check: a.cfg.FontSize == v})
 	}
 	colors := make([]mItem, 0, len(palettes))
-	for i, p := range palettes {
+	for i := range palettes {
 		colors = append(colors, mItem{cmd: cmdPalBase + int32(i),
-			label: p.name, check: a.cfg.Palette == i})
+			label: txtColors[i], check: a.cfg.Palette == i})
+	}
+	langs := []mItem{{cmd: cmdLangBase, label: txtLangAuto, check: a.cfg.Lang == ""}}
+	for i, name := range langNames {
+		langs = append(langs, mItem{cmd: cmdLangBase + 1 + int32(i),
+			label: name, check: a.cfg.Lang == langCodes[i]})
 	}
 
 	items := []mItem{
 		{label: txtGlassOpacity, sub: alpha},
 		{label: txtFontSize, sub: sizes},
 		{label: txtTextColor, sub: colors},
+		{label: txtLanguage, sub: langs},
 		{sep: true},
 		{cmd: cmdGlow, label: txtTextGlow, accel: "Ctrl+G", check: a.cfg.Glow},
 		{cmd: cmdMode, label: txtMarkerBG, accel: "Ctrl+M", check: a.cfg.Mode == modeMarker},
@@ -1145,6 +1176,12 @@ func (a *app) command(cmd int32) {
 	case cmd >= cmdAlphaBase && cmd < cmdAlphaBase+int32(len(alphaPresets)):
 		a.applyAlpha(alphaPresets[cmd-cmdAlphaBase])
 		return
+	case cmd == cmdLangBase:
+		a.setLanguage("")
+		return
+	case cmd > cmdLangBase && cmd <= cmdLangBase+int32(len(langCodes)):
+		a.setLanguage(langCodes[cmd-cmdLangBase-1])
+		return
 	}
 
 	switch cmd {
@@ -1357,6 +1394,9 @@ func loadConfig(path string) config {
 	}
 	if !cfg.Tray && !cfg.Taskbar {
 		cfg.Tray = true // there must always be at least one way to reach the window
+	}
+	if cfg.Lang != "" && langIndex(cfg.Lang) < 0 {
+		cfg.Lang = ""
 	}
 	if cfg.W < 220 {
 		cfg.W = 560
